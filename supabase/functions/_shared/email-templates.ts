@@ -219,3 +219,100 @@ export function counselorRoleUpgrade(counselorName: string): string {
     ${dashboardButton("Go to Dashboard")}
   `);
 }
+
+export function counselorApproval(counselorName: string): string {
+  return layout(`
+    <h2 style="margin:0 0 8px;font-size:21px;font-weight:400;color:${BRAND.navy};">Your counselor account is approved <span style="color:${BRAND.blue};">&#10003;</span></h2>
+    <p style="margin:0 0 20px;font-size:15px;color:${BRAND.textMuted};">Hi${counselorName ? ` ${counselorName}` : ""},</p>
+    <p style="margin:0 0 4px;font-size:15px;line-height:1.6;">Your request for counselor access has been approved. You can now log in and start managing students through your dashboard.</p>
+    ${dashboardButton("Go to Dashboard")}
+  `);
+}
+
+export function counselorRequestNotification(fullName: string, email: string): string {
+  return layout(`
+    <h2 style="margin:0 0 8px;font-size:21px;font-weight:400;color:${BRAND.navy};">New counselor request</h2>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">A new counselor has requested access to IvyPi:</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;background-color:${BRAND.bg};border-radius:8px;border:1px solid #e5e7eb;border-left:2px solid ${BRAND.blue};">
+      <tr>
+        <td style="padding:16px 20px;">
+          <p style="margin:0 0 6px;font-size:12px;color:${BRAND.blue};text-transform:uppercase;letter-spacing:0.5px;font-weight:400;">Name</p>
+          <p style="margin:0 0 14px;font-size:15px;font-weight:400;color:${BRAND.navy};">${fullName || "Not provided"}</p>
+          <p style="margin:0 0 6px;font-size:12px;color:${BRAND.blue};text-transform:uppercase;letter-spacing:0.5px;font-weight:400;">Email</p>
+          <p style="margin:0;font-size:15px;font-weight:400;color:${BRAND.navy};">${email}</p>
+        </td>
+      </tr>
+    </table>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;">
+      <tr>
+        <td style="border:1px solid ${BRAND.navy};">
+          <a href="https://ivypi.org/dashboard/admin" style="display:inline-block;padding:10px 28px;font-size:14px;font-weight:400;color:${BRAND.navy};text-decoration:none;letter-spacing:0.3px;">Review Request &rarr;</a>
+        </td>
+      </tr>
+    </table>
+  `);
+}
+
+// ── Auth Email Templates ──
+
+export function signupConfirmation(confirmUrl: string): string {
+  return layout(`
+    <h2 style="margin:0 0 8px;font-size:21px;font-weight:400;color:${BRAND.navy};">Verify your email address</h2>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">Thanks for signing up for IvyPi. To get started, please confirm your email address by clicking the button below.</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;">
+      <tr>
+        <td style="background-color:${BRAND.navy};border-radius:6px;">
+          <a href="${confirmUrl}" style="display:inline-block;padding:12px 32px;font-size:14px;font-weight:400;color:${BRAND.white};text-decoration:none;letter-spacing:0.3px;">Verify Email &rarr;</a>
+        </td>
+      </tr>
+    </table>
+    <p style="margin:24px 0 0;font-size:13px;color:${BRAND.textMuted};line-height:1.5;">If you didn't create an IvyPi account, you can safely ignore this email.</p>
+  `);
+}
+
+export function passwordReset(resetUrl: string): string {
+  return layout(`
+    <h2 style="margin:0 0 8px;font-size:21px;font-weight:400;color:${BRAND.navy};">Reset your password</h2>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">We received a request to reset the password for your IvyPi account. Click the button below to choose a new password.</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;">
+      <tr>
+        <td style="background-color:${BRAND.navy};border-radius:6px;">
+          <a href="${resetUrl}" style="display:inline-block;padding:12px 32px;font-size:14px;font-weight:400;color:${BRAND.white};text-decoration:none;letter-spacing:0.3px;">Reset Password &rarr;</a>
+        </td>
+      </tr>
+    </table>
+    <p style="margin:24px 0 4px;font-size:13px;color:${BRAND.textMuted};line-height:1.5;">This link will expire in 24 hours.</p>
+    <p style="margin:0;font-size:13px;color:${BRAND.textMuted};line-height:1.5;">If you didn't request a password reset, you can safely ignore this email. Your password will remain unchanged.</p>
+  `);
+}
+
+export function magicLink(magicLinkUrl: string): string {
+  return layout(`
+    <h2 style="margin:0 0 8px;font-size:21px;font-weight:400;color:${BRAND.navy};">Sign in to IvyPi</h2>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">Click the button below to sign in to your IvyPi account. No password needed.</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;">
+      <tr>
+        <td style="background-color:${BRAND.navy};border-radius:6px;">
+          <a href="${magicLinkUrl}" style="display:inline-block;padding:12px 32px;font-size:14px;font-weight:400;color:${BRAND.white};text-decoration:none;letter-spacing:0.3px;">Sign In &rarr;</a>
+        </td>
+      </tr>
+    </table>
+    <p style="margin:24px 0 4px;font-size:13px;color:${BRAND.textMuted};line-height:1.5;">This link will expire in 10 minutes.</p>
+    <p style="margin:0;font-size:13px;color:${BRAND.textMuted};line-height:1.5;">If you didn't request this link, you can safely ignore this email.</p>
+  `);
+}
+
+export function emailChange(newEmail: string, confirmUrl: string): string {
+  return layout(`
+    <h2 style="margin:0 0 8px;font-size:21px;font-weight:400;color:${BRAND.navy};">Confirm your new email address</h2>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">You requested to change your IvyPi email address to <strong>${newEmail}</strong>. Please confirm by clicking the button below.</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;">
+      <tr>
+        <td style="background-color:${BRAND.navy};border-radius:6px;">
+          <a href="${confirmUrl}" style="display:inline-block;padding:12px 32px;font-size:14px;font-weight:400;color:${BRAND.white};text-decoration:none;letter-spacing:0.3px;">Confirm Email Change &rarr;</a>
+        </td>
+      </tr>
+    </table>
+    <p style="margin:24px 0 0;font-size:13px;color:${BRAND.textMuted};line-height:1.5;">If you didn't request this change, please secure your account by resetting your password immediately.</p>
+  `);
+}
