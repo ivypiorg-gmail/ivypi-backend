@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   counselorInvite,
   counselorRoleUpgrade,
+  counselorApproval,
 } from "../_shared/email-templates.ts";
 
 const corsHeaders = {
@@ -64,13 +65,15 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Check if email belongs to an existing user
-    // Look up existing user by email using admin API filter
+    // Check if email belongs to an existing user (exact match only)
+    const normalizedEmail = email.toLowerCase();
     const { data: { users: existingUsers } } = await supabase.auth.admin.listUsers({
-      filter: email.toLowerCase(),
-      perPage: 1,
+      filter: normalizedEmail,
+      perPage: 50,
     });
-    const existingUser = existingUsers?.[0];
+    const existingUser = existingUsers?.find(
+      (u: { email?: string }) => u.email?.toLowerCase() === normalizedEmail,
+    );
 
     if (existingUser) {
       // Check their current role
@@ -87,6 +90,8 @@ Deno.serve(async (req: Request) => {
         );
       }
 
+      const isPendingCounselor = existingProfile?.role === "pending_counselor";
+
       // Upgrade existing user to counselor
       const { error: updateError } = await supabase
         .from("profiles")
@@ -97,7 +102,19 @@ Deno.serve(async (req: Request) => {
         throw new Error(`Failed to upgrade user: ${updateError.message}`);
       }
 
-      // Send upgrade notification email
+      // Update auth user_metadata to reflect new role
+      await supabase.auth.admin.updateUserById(existingUser.id, {
+        user_metadata: { role: "counselor", requested_role: null },
+      });
+
+      // Send appropriate notification email
+      const emailSubject = isPendingCounselor
+        ? "Your Counselor Account Has Been Approved"
+        : "Your IvyPi Account Has Been Upgraded";
+      const emailHtml = isPendingCounselor
+        ? counselorApproval(existingProfile?.full_name || "")
+        : counselorRoleUpgrade(existingProfile?.full_name || "");
+
       const upgradeEmailResponse = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: {
@@ -107,8 +124,8 @@ Deno.serve(async (req: Request) => {
         body: JSON.stringify({
           from: "IvyPi <noreply@ivypi.org>",
           to: [email],
-          subject: "Your IvyPi Account Has Been Upgraded",
-          html: counselorRoleUpgrade(existingProfile?.full_name || ""),
+          subject: emailSubject,
+          html: emailHtml,
         }),
       });
 
@@ -117,8 +134,12 @@ Deno.serve(async (req: Request) => {
         console.error("Failed to send upgrade email:", err);
       }
 
+      const successMessage = isPendingCounselor
+        ? "Pending counselor approved and notified"
+        : "Existing user upgraded to counselor";
+
       return new Response(
-        JSON.stringify({ message: `Existing user upgraded to counselor` }),
+        JSON.stringify({ message: successMessage }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
