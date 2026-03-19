@@ -86,31 +86,69 @@ Deno.serve(async (req: Request) => {
       new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ""),
     );
 
-    // Send to Claude for extraction
-    const systemPrompt = `You are an activities/resume parser for a college consulting platform. Extract structured extracurricular activity data from the document.
+    // Send to Claude for unified extraction
+    const systemPrompt = `You are a document parser for a college consulting platform. Extract ALL structured data from the student document — it may be a transcript, resume, activity list, or a combination.
 
 Return ONLY valid JSON with this exact structure:
 {
+  "detected_types": ["transcript", "resume", "activity_list"],
+  "profile": {
+    "student_name": "string or null",
+    "school_name": "string or null",
+    "gpa_unweighted": number or null,
+    "gpa_weighted": number or null,
+    "class_rank": "string or null",
+    "test_scores": {
+      "sat_math": number or null,
+      "sat_verbal": number or null,
+      "act": number or null
+    }
+  },
+  "courses": [
+    {
+      "name": "string",
+      "course_type": "high_school|college|online",
+      "subject_area": "math|science|english|history|foreign_language|arts|computer_science|social_science|other",
+      "level": "regular|honors|ap|ib|dual_enrollment|other",
+      "grade": "string (letter grade like A+, B, etc.) or null",
+      "year": "string (e.g. 2023-24) or null",
+      "semester": "string or null (e.g. Fall, Spring, S1, S2)"
+    }
+  ],
   "activities": [
     {
       "name": "string",
       "category": "academic|arts|athletics|community_service|leadership|work|research|other",
       "role": "string or null (e.g. President, Captain, Volunteer)",
-      "years_active": [9, 10, 11] (array of grade years as integers, or null),
+      "years_active": [9, 10, 11] or null,
       "hours_per_week": number or null,
-      "impact_description": "string or null (brief description of impact/achievements)",
+      "impact_description": "string or null",
+      "resume_bullets": "string or null (preserve the EXACT bullet point text from the document, one bullet per line)",
       "depth_tier": "exceptional|strong|moderate|introductory"
+    }
+  ],
+  "awards": [
+    {
+      "title": "string",
+      "level": "international|national|state|regional|school" or null,
+      "category": "stem|service|academic|arts|athletics|other" or null,
+      "grade_year": number or null,
+      "description": "string or null"
     }
   ]
 }
 
-Guidelines for depth_tier:
-- exceptional: Multi-year commitment with significant achievements, leadership, or recognition at state/national level
-- strong: Sustained involvement with clear growth, leadership roles, or notable impact
-- moderate: Regular participation with some advancement or contribution
-- introductory: Casual or short-term participation
-
-Extract ALL activities visible in the document. Be thorough but accurate.`;
+Guidelines:
+- detected_types: list which types of data are present (e.g. ["transcript"] if only courses/GPA found)
+- Extract ALL courses, activities, and awards visible in the document
+- Infer subject_area/level from course names (e.g. "AP Calculus BC" → math, ap)
+- course_type: "college" for university/dual enrollment courses, "online" for online courses, "high_school" for everything else
+- Infer activity category from context
+- Use standard letter grades for course grades when possible
+- For resume_bullets: copy the EXACT bullet point text from the document verbatim, one bullet per line (no leading dashes/dots). If the document has no bullet points for an activity, use null
+- For depth_tier: exceptional = multi-year with state/national recognition, strong = sustained with leadership, moderate = regular participation, introductory = casual/short-term
+- Return empty arrays for data types not present in the document
+- Use null when uncertain rather than guessing`;
 
     const userContent = [
       {
@@ -123,12 +161,34 @@ Extract ALL activities visible in the document. Be thorough but accurate.`;
       },
       {
         type: "text" as const,
-        text: "Parse this resume/activity list. Extract all extracurricular activities with details. Return JSON only.",
+        text: "Parse this student document. Extract all available data: profile info, courses, activities, and awards. Return JSON only.",
       },
     ];
 
-    const result = await callClaude(systemPrompt, userContent, 8192);
+    const result = await callClaude(systemPrompt, userContent, 16384);
     const parsed = parseJsonResponse<{
+      detected_types: string[];
+      profile: {
+        student_name: string | null;
+        school_name: string | null;
+        gpa_unweighted: number | null;
+        gpa_weighted: number | null;
+        class_rank: string | null;
+        test_scores: {
+          sat_math: number | null;
+          sat_verbal: number | null;
+          act: number | null;
+        };
+      };
+      courses: Array<{
+        name: string;
+        course_type: string;
+        subject_area: string;
+        level: string;
+        grade: string | null;
+        year: string | null;
+        semester: string | null;
+      }>;
       activities: Array<{
         name: string;
         category: string;
@@ -136,45 +196,35 @@ Extract ALL activities visible in the document. Be thorough but accurate.`;
         years_active: number[] | null;
         hours_per_week: number | null;
         impact_description: string | null;
+        resume_bullets: string | null;
         depth_tier: string;
+      }>;
+      awards: Array<{
+        title: string;
+        level: string | null;
+        category: string | null;
+        grade_year: number | null;
+        description: string | null;
       }>;
     }>(result.text);
 
-    // Save parsed data to document
+    // Save parsed data to document — do NOT insert courses/activities/awards
     await supabase
       .from("documents")
       .update({ parsed_data: parsed, parse_status: "complete" })
       .eq("id", document_id);
 
-    // Insert activities (delete existing from this document first)
-    await supabase.from("activities").delete().eq("document_id", document_id);
-
-    if (parsed.activities?.length) {
-      const activityRows = parsed.activities.map((a) => ({
-        student_id: doc.student_id,
-        document_id: document_id,
-        name: a.name,
-        category: a.category || "other",
-        role: a.role || null,
-        years_active: a.years_active || null,
-        hours_per_week: a.hours_per_week || null,
-        impact_description: a.impact_description || null,
-        depth_tier: a.depth_tier || null,
-      }));
-
-      await supabase.from("activities").insert(activityRows);
-    }
-
     return new Response(
       JSON.stringify({
-        message: "Resume parsed successfully",
-        activities_extracted: parsed.activities?.length || 0,
+        message: "Document parsed successfully",
+        data: parsed,
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (err) {
-    console.error("parse-resume error:", err);
+    console.error("parse-document error:", err);
 
+    // Try to mark document as failed
     try {
       const { document_id } = await req.clone().json();
       if (document_id) {

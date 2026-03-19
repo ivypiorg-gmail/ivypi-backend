@@ -11,7 +11,7 @@ export interface ClaudeMessage {
 }
 
 export interface ClaudeContentBlock {
-  type: "text" | "image";
+  type: "text" | "image" | "document";
   text?: string;
   source?: {
     type: "base64";
@@ -25,11 +25,21 @@ export interface ClaudeResponse {
   usage: { input_tokens: number; output_tokens: number };
 }
 
+export interface ClaudeResult {
+  text: string;
+  usage: { input_tokens: number; output_tokens: number };
+  model: string;
+}
+
+/**
+ * Call Claude API and return the text response with usage data.
+ */
 export async function callClaude(
   system: string,
   userContent: string | ClaudeContentBlock[],
   maxTokens = 4096,
-): Promise<string> {
+  model = DEFAULT_MODEL,
+): Promise<ClaudeResult> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not configured");
@@ -47,7 +57,7 @@ export async function callClaude(
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: DEFAULT_MODEL,
+      model,
       max_tokens: maxTokens,
       system,
       messages,
@@ -65,7 +75,11 @@ export async function callClaude(
     throw new Error("No text response from Claude");
   }
 
-  return textBlock.text;
+  return {
+    text: textBlock.text,
+    usage: data.usage,
+    model,
+  };
 }
 
 /**

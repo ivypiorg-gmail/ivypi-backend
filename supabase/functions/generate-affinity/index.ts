@@ -139,7 +139,7 @@ Important:
 
 Generate affinity reports for these schools: ${schoolNames.join(", ")}`;
 
-    const response = await callClaude(systemPrompt, userPrompt, 8192);
+    const result = await callClaude(systemPrompt, userPrompt, 8192);
     const parsed = parseJsonResponse<{
       reports: Record<string, {
         strengths: string[];
@@ -147,7 +147,7 @@ Generate affinity reports for these schools: ${schoolNames.join(", ")}`;
         growth_areas: string[];
         narrative: string;
       }>;
-    }>(response);
+    }>(result.text);
 
     // Update each school's affinity report
     let updatedCount = 0;

@@ -36,6 +36,7 @@ Located in `supabase/functions/`. Deployed via `supabase functions deploy <name>
 
 - **AI-powered:** `parse-transcript`, `parse-resume`, `generate-profile`, `generate-affinity`, `model-scenario`
 - **Notifications:** `send-booking-confirmation`, `send-cancellation-notice`, `send-counselor-invite`, `send-reminder-emails`, `send-reminder-sms`
+- **Auth:** `send-auth-email` — Supabase Auth Email Hook; sends branded signup verification, password reset, magic link, and email change emails via Resend
 - **Scheduling:** `generate-recurring-sessions`
 - **Shared:** `_shared/ai-helpers.ts`, `_shared/email-templates.ts`
 

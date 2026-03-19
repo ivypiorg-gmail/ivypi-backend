@@ -116,7 +116,7 @@ Guidelines:
 
     const userContent = [
       {
-        type: "image" as const,
+        type: "document" as const,
         source: {
           type: "base64" as const,
           media_type: "application/pdf",
@@ -129,7 +129,7 @@ Guidelines:
       },
     ];
 
-    const response = await callClaude(systemPrompt, userContent, 8192);
+    const result = await callClaude(systemPrompt, userContent, 8192);
     const parsed = parseJsonResponse<{
       student_name: string | null;
       school_name: string | null;
@@ -143,7 +143,7 @@ Guidelines:
         year: string;
         semester: string | null;
       }>;
-    }>(response);
+    }>(result.text);
 
     // Save parsed data to document
     await supabase

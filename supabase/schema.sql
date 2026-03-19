@@ -66,6 +66,16 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+CREATE TYPE "public"."action_item_status" AS ENUM (
+    'open',
+    'in_progress',
+    'done'
+);
+
+
+ALTER TYPE "public"."action_item_status" OWNER TO "postgres";
+
+
 CREATE TYPE "public"."activity_category" AS ENUM (
     'academic',
     'arts',
@@ -97,11 +107,13 @@ ALTER TYPE "public"."app_status" OWNER TO "postgres";
 
 
 CREATE TYPE "public"."booking_status" AS ENUM (
+    'proposed',
     'confirmed',
     'cancelled_by_client',
     'cancelled_by_counselor',
     'completed',
-    'no_show'
+    'no_show',
+    'declined'
 );
 
 
@@ -121,6 +133,16 @@ CREATE TYPE "public"."course_level" AS ENUM (
 ALTER TYPE "public"."course_level" OWNER TO "postgres";
 
 
+CREATE TYPE "public"."course_type" AS ENUM (
+    'high_school',
+    'college',
+    'online'
+);
+
+
+ALTER TYPE "public"."course_type" OWNER TO "postgres";
+
+
 CREATE TYPE "public"."depth_tier" AS ENUM (
     'exceptional',
     'strong',
@@ -135,7 +157,8 @@ ALTER TYPE "public"."depth_tier" OWNER TO "postgres";
 CREATE TYPE "public"."document_type" AS ENUM (
     'transcript',
     'resume',
-    'activity_list'
+    'activity_list',
+    'document'
 );
 
 
@@ -178,7 +201,8 @@ CREATE TYPE "public"."student_status" AS ENUM (
     'active',
     'inactive',
     'graduated',
-    'deferred'
+    'deferred',
+    'pending_approval'
 );
 
 
@@ -204,7 +228,8 @@ ALTER TYPE "public"."subject_area" OWNER TO "postgres";
 CREATE TYPE "public"."user_role" AS ENUM (
     'student_parent',
     'counselor',
-    'admin'
+    'admin',
+    'pending_counselor'
 );
 
 
@@ -253,110 +278,46 @@ $$;
 ALTER FUNCTION "public"."current_user_role"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_available_slots"("p_counselor_id" "uuid", "p_start_date" "date", "p_end_date" "date") RETURNS TABLE("slot_date" "date", "start_time" time without time zone, "end_time" time without time zone)
-    LANGUAGE "plpgsql" STABLE
+CREATE OR REPLACE FUNCTION "public"."delete_comments_for_target"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
-DECLARE
-  d DATE;
-  dow SMALLINT;
-  win RECORD;
-  slot_start TIME;
-  slot_end TIME;
 BEGIN
-  -- Loop through each date in the range
-  FOR d IN SELECT generate_series(p_start_date, p_end_date, '1 day'::interval)::date
-  LOOP
-    dow := EXTRACT(DOW FROM d)::smallint;
-
-    -- Check if entire day is blocked by override
-    IF EXISTS (
-      SELECT 1 FROM public.availability_overrides ao
-      WHERE ao.counselor_id = p_counselor_id
-        AND ao.override_date = d
-        AND ao.is_available = false
-        AND ao.start_time IS NULL
-    ) THEN
-      CONTINUE;
-    END IF;
-
-    -- Generate slots from availability windows for this day
-    FOR win IN
-      SELECT aw.start_time AS w_start, aw.end_time AS w_end, aw.slot_duration
-      FROM public.availability_windows aw
-      WHERE aw.counselor_id = p_counselor_id
-        AND aw.day_of_week = dow
-        AND aw.is_active = true
-    LOOP
-      slot_start := win.w_start;
-      WHILE slot_start + (win.slot_duration || ' minutes')::interval <= win.w_end LOOP
-        slot_end := (slot_start + (win.slot_duration || ' minutes')::interval)::time;
-
-        -- Skip if blocked by partial override
-        IF NOT EXISTS (
-          SELECT 1 FROM public.availability_overrides ao
-          WHERE ao.counselor_id = p_counselor_id
-            AND ao.override_date = d
-            AND ao.is_available = false
-            AND ao.start_time IS NOT NULL
-            AND slot_start < ao.end_time
-            AND slot_end > ao.start_time
-        )
-        -- Skip if already booked
-        AND NOT EXISTS (
-          SELECT 1 FROM public.bookings b
-          WHERE b.counselor_id = p_counselor_id
-            AND b.status = 'confirmed'
-            AND b.starts_at < (d + slot_end)::timestamptz
-            AND b.ends_at > (d + slot_start)::timestamptz
-        )
-        THEN
-          slot_date := d;
-          start_time := slot_start;
-          end_time := slot_end;
-          RETURN NEXT;
-        END IF;
-
-        slot_start := slot_end;
-      END LOOP;
-    END LOOP;
-
-    -- Also include extra slots from "available" overrides
-    FOR win IN
-      SELECT ao.start_time AS w_start, ao.end_time AS w_end
-      FROM public.availability_overrides ao
-      WHERE ao.counselor_id = p_counselor_id
-        AND ao.override_date = d
-        AND ao.is_available = true
-        AND ao.start_time IS NOT NULL
-    LOOP
-      -- Use default 60-minute slots for override windows
-      slot_start := win.w_start;
-      WHILE slot_start + '60 minutes'::interval <= win.w_end LOOP
-        slot_end := (slot_start + '60 minutes'::interval)::time;
-
-        IF NOT EXISTS (
-          SELECT 1 FROM public.bookings b
-          WHERE b.counselor_id = p_counselor_id
-            AND b.status = 'confirmed'
-            AND b.starts_at < (d + slot_end)::timestamptz
-            AND b.ends_at > (d + slot_start)::timestamptz
-        )
-        THEN
-          slot_date := d;
-          start_time := slot_start;
-          end_time := slot_end;
-          RETURN NEXT;
-        END IF;
-
-        slot_start := slot_end;
-      END LOOP;
-    END LOOP;
-  END LOOP;
+  DELETE FROM comments
+  WHERE target_type = TG_ARGV[0] AND target_id = OLD.id;
+  RETURN OLD;
 END;
 $$;
 
 
-ALTER FUNCTION "public"."get_available_slots"("p_counselor_id" "uuid", "p_start_date" "date", "p_end_date" "date") OWNER TO "postgres";
+ALTER FUNCTION "public"."delete_comments_for_target"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") RETURNS TABLE("slot_date" "date", "slot_start" time without time zone)
+    LANGUAGE "sql" STABLE
+    AS $$
+  SELECT c.slot_date, c.slot_start
+  FROM public.availability_slots c
+  JOIN public.availability_slots s
+    ON  s.slot_date  = c.slot_date
+    AND s.slot_start = c.slot_start
+  WHERE c.owner_type = 'counselor'
+    AND c.owner_id   = p_counselor_id
+    AND s.owner_type = 'student'
+    AND s.owner_id   = p_student_id
+    AND c.slot_date BETWEEN p_start_date AND p_end_date
+    -- Exclude slots where a confirmed booking already exists.
+    AND NOT EXISTS (
+      SELECT 1 FROM public.bookings b
+      WHERE b.counselor_id = p_counselor_id
+        AND b.status = 'confirmed'
+        AND (c.slot_date + c.slot_start) AT TIME ZONE 'UTC' < b.ends_at
+        AND (c.slot_date + c.slot_start + interval '30 minutes') AT TIME ZONE 'UTC' > b.starts_at
+    )
+  ORDER BY c.slot_date, c.slot_start;
+$$;
+
+
+ALTER FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
@@ -365,25 +326,75 @@ CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
     AS $$
 DECLARE
   v_invite_exists BOOLEAN;
+  v_requested_role TEXT;
+  v_role public.user_role;
+  v_supabase_url TEXT;
+  v_service_role_key TEXT;
+  v_request_id BIGINT;
 BEGIN
+  -- 1. Check for pending counselor invite
   SELECT EXISTS(
     SELECT 1 FROM public.counselor_invites
     WHERE email = NEW.email AND status = 'pending'
   ) INTO v_invite_exists;
 
+  -- 2. Determine role
+  IF v_invite_exists THEN
+    v_role := 'counselor'::public.user_role;
+  ELSE
+    v_requested_role := NEW.raw_user_meta_data ->> 'requested_role';
+    IF v_requested_role = 'counselor' THEN
+      v_role := 'pending_counselor'::public.user_role;
+    ELSE
+      v_role := 'student_parent'::public.user_role;
+    END IF;
+  END IF;
+
+  -- 3. Create profile
   INSERT INTO public.profiles (id, full_name, avatar_url, role, email)
   VALUES (
     NEW.id,
     COALESCE(NEW.raw_user_meta_data ->> 'full_name', NEW.raw_user_meta_data ->> 'name', ''),
     COALESCE(NEW.raw_user_meta_data ->> 'avatar_url', NEW.raw_user_meta_data ->> 'picture', ''),
-    CASE WHEN v_invite_exists THEN 'counselor'::public.user_role ELSE 'student_parent'::public.user_role END,
+    v_role,
     NEW.email
   );
 
+  -- 4. Write role to user_metadata so middleware can read without DB query
+  UPDATE auth.users
+  SET raw_user_meta_data = COALESCE(raw_user_meta_data, '{}'::jsonb) || jsonb_build_object('role', v_role::text)
+  WHERE id = NEW.id;
+
+  -- 5. Accept invite if applicable
   IF v_invite_exists THEN
     UPDATE public.counselor_invites
     SET status = 'accepted', accepted_at = now()
     WHERE email = NEW.email AND status = 'pending';
+  END IF;
+
+  -- 6. Notify admins if pending counselor (using Vault secrets, matching auth email hook pattern)
+  IF v_role = 'pending_counselor'::public.user_role THEN
+    SELECT decrypted_secret INTO v_supabase_url
+    FROM vault.decrypted_secrets WHERE name = 'supabase_url' LIMIT 1;
+
+    SELECT decrypted_secret INTO v_service_role_key
+    FROM vault.decrypted_secrets WHERE name = 'service_role_key' LIMIT 1;
+
+    IF v_supabase_url IS NOT NULL AND v_service_role_key IS NOT NULL THEN
+      SELECT net.http_post(
+        url := v_supabase_url || '/functions/v1/notify-counselor-request',
+        headers := jsonb_build_object(
+          'Content-Type', 'application/json',
+          'Authorization', 'Bearer ' || v_service_role_key
+        ),
+        body := jsonb_build_object(
+          'user_id', NEW.id,
+          'email', NEW.email,
+          'full_name', COALESCE(NEW.raw_user_meta_data ->> 'full_name', NEW.raw_user_meta_data ->> 'name', '')
+        ),
+        timeout_milliseconds := 5000
+      ) INTO v_request_id;
+    END IF;
   END IF;
 
   RETURN NEW;
@@ -392,6 +403,63 @@ $$;
 
 
 ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."send_auth_email"("event" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  edge_function_url text;
+  service_role_key text;
+  request_id bigint;
+begin
+  -- Build the edge function URL from vault secrets / config
+  edge_function_url := (
+    select decrypted_secret
+    from vault.decrypted_secrets
+    where name = 'supabase_url'
+    limit 1
+  );
+
+  -- Fallback: construct from project ref if vault secret not available
+  if edge_function_url is null then
+    edge_function_url := 'https://gybkzyjtqhvxbuqzqanp.supabase.co';
+  end if;
+
+  edge_function_url := edge_function_url || '/functions/v1/send-auth-email';
+
+  service_role_key := (
+    select decrypted_secret
+    from vault.decrypted_secrets
+    where name = 'service_role_key'
+    limit 1
+  );
+
+  -- If no service role key in vault, the hook can't authenticate to the edge function.
+  -- Fall back to letting Supabase send the default email.
+  if service_role_key is null then
+    raise warning 'send_auth_email: service_role_key not found in vault, falling back to default email';
+    return event;
+  end if;
+
+  -- Fire-and-forget HTTP POST to the edge function
+  select net.http_post(
+    url := edge_function_url,
+    body := event,
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'Authorization', 'Bearer ' || service_role_key
+    ),
+    timeout_milliseconds := 5000
+  ) into request_id;
+
+  return event;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."send_auth_email"("event" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."update_updated_at"() RETURNS "trigger"
@@ -411,6 +479,26 @@ SET default_tablespace = '';
 SET default_table_access_method = "heap";
 
 
+CREATE TABLE IF NOT EXISTS "public"."action_items" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "booking_id" "uuid",
+    "client_id" "uuid" NOT NULL,
+    "counselor_id" "uuid" NOT NULL,
+    "title" "text" NOT NULL,
+    "description" "text",
+    "assigned_to" "uuid",
+    "status" "public"."action_item_status" DEFAULT 'open'::"public"."action_item_status" NOT NULL,
+    "due_date" "date",
+    "sort_order" integer,
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."action_items" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."activities" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "student_id" "uuid" NOT NULL,
@@ -422,43 +510,58 @@ CREATE TABLE IF NOT EXISTS "public"."activities" (
     "hours_per_week" numeric(4,1),
     "impact_description" "text",
     "depth_tier" "public"."depth_tier",
-    "depth_narrative" "text"
+    "depth_narrative" "text",
+    "organization" "text",
+    "weeks_per_year" integer,
+    "common_app_description" "text",
+    "activity_type" "text",
+    "sort_order" integer,
+    "uc_description" "text",
+    "resume_bullets" "text"
 );
 
 
 ALTER TABLE "public"."activities" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."availability_overrides" (
+CREATE TABLE IF NOT EXISTS "public"."availability_slots" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "counselor_id" "uuid" NOT NULL,
-    "override_date" "date" NOT NULL,
-    "start_time" time without time zone,
-    "end_time" time without time zone,
-    "is_available" boolean DEFAULT false NOT NULL,
-    "reason" "text",
+    "owner_type" "text" NOT NULL,
+    "owner_id" "uuid" NOT NULL,
+    "slot_date" "date" NOT NULL,
+    "slot_start" time without time zone NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "availability_slots_owner_type_check" CHECK (("owner_type" = ANY (ARRAY['counselor'::"text", 'student'::"text"])))
+);
+
+
+ALTER TABLE "public"."availability_slots" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."awards" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "student_id" "uuid" NOT NULL,
+    "title" "text" NOT NULL,
+    "level" "text",
+    "category" "text",
+    "grade_year" integer,
+    "description" "text",
+    "sort_order" integer,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
 );
 
 
-ALTER TABLE "public"."availability_overrides" OWNER TO "postgres";
+ALTER TABLE "public"."awards" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."availability_windows" (
+CREATE TABLE IF NOT EXISTS "public"."booking_students" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "counselor_id" "uuid" NOT NULL,
-    "day_of_week" smallint NOT NULL,
-    "start_time" time without time zone NOT NULL,
-    "end_time" time without time zone NOT NULL,
-    "slot_duration" smallint DEFAULT 60 NOT NULL,
-    "is_active" boolean DEFAULT true NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    CONSTRAINT "availability_windows_day_of_week_check" CHECK ((("day_of_week" >= 0) AND ("day_of_week" <= 6))),
-    CONSTRAINT "valid_time_range" CHECK (("end_time" > "start_time"))
+    "booking_id" "uuid" NOT NULL,
+    "student_id" "uuid" NOT NULL
 );
 
 
-ALTER TABLE "public"."availability_windows" OWNER TO "postgres";
+ALTER TABLE "public"."booking_students" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."bookings" (
@@ -473,11 +576,29 @@ CREATE TABLE IF NOT EXISTS "public"."bookings" (
     "notes" "text",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "proposed_by" "uuid",
+    "google_calendar_event_id" "text",
     CONSTRAINT "valid_booking_range" CHECK (("ends_at" > "starts_at"))
 );
 
 
 ALTER TABLE "public"."bookings" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."college_data_corrections" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "school_name" "text" NOT NULL,
+    "submitted_by" "uuid" NOT NULL,
+    "note" "text" NOT NULL,
+    "status" "text" DEFAULT 'pending'::"text",
+    "resolved_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "resolved_at" timestamp with time zone,
+    CONSTRAINT "college_data_corrections_status_check" CHECK (("status" = ANY (ARRAY['pending'::"text", 'approved'::"text", 'dismissed'::"text"])))
+);
+
+
+ALTER TABLE "public"."college_data_corrections" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."college_lists" (
@@ -494,6 +615,43 @@ CREATE TABLE IF NOT EXISTS "public"."college_lists" (
 
 
 ALTER TABLE "public"."college_lists" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."college_suggestions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "student_id" "uuid" NOT NULL,
+    "suggested_by" "uuid" NOT NULL,
+    "suggestion_type" "text" NOT NULL,
+    "school_name" "text",
+    "college_list_id" "uuid",
+    "suggested_status" "public"."app_status",
+    "status" "text" DEFAULT 'pending'::"text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "resolved_at" timestamp with time zone,
+    "resolved_by" "uuid",
+    CONSTRAINT "college_suggestions_status_check" CHECK (("status" = ANY (ARRAY['pending'::"text", 'approved'::"text", 'dismissed'::"text"]))),
+    CONSTRAINT "college_suggestions_suggestion_type_check" CHECK (("suggestion_type" = ANY (ARRAY['add_school'::"text", 'update_status'::"text"])))
+);
+
+
+ALTER TABLE "public"."college_suggestions" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."comments" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "student_id" "uuid" NOT NULL,
+    "author_id" "uuid" NOT NULL,
+    "body" "text" NOT NULL,
+    "target_type" "text",
+    "target_id" "uuid",
+    "parent_id" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "comments_target_consistency" CHECK ((("target_type" IS NULL) = ("target_id" IS NULL)))
+);
+
+
+ALTER TABLE "public"."comments" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."counselor_invites" (
@@ -519,7 +677,8 @@ CREATE TABLE IF NOT EXISTS "public"."courses" (
     "level" "public"."course_level" DEFAULT 'regular'::"public"."course_level",
     "grade" "text",
     "year" "text",
-    "semester" "text"
+    "semester" "text",
+    "course_type" "public"."course_type" DEFAULT 'high_school'::"public"."course_type"
 );
 
 
@@ -543,13 +702,31 @@ CREATE TABLE IF NOT EXISTS "public"."documents" (
 ALTER TABLE "public"."documents" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."google_calendar_tokens" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "access_token" "text" NOT NULL,
+    "refresh_token" "text" NOT NULL,
+    "token_expires_at" timestamp with time zone NOT NULL,
+    "calendar_id" "text" DEFAULT 'primary'::"text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."google_calendar_tokens" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."notifications_log" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "booking_id" "uuid",
     "type" "public"."notification_type" NOT NULL,
     "recipient" "text" NOT NULL,
     "sent_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "status" "text" DEFAULT 'sent'::"text" NOT NULL
+    "status" "text" DEFAULT 'sent'::"text" NOT NULL,
+    "recipient_id" "uuid",
+    "channel" "text" DEFAULT 'email'::"text",
+    "metadata" "jsonb" DEFAULT '{}'::"jsonb"
 );
 
 
@@ -588,6 +765,21 @@ CREATE TABLE IF NOT EXISTS "public"."scenarios" (
 ALTER TABLE "public"."scenarios" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."session_notes" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "booking_id" "uuid" NOT NULL,
+    "author_id" "uuid" NOT NULL,
+    "summary" "text",
+    "discussion_points" "text",
+    "next_steps" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."session_notes" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."students" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid",
@@ -601,11 +793,47 @@ CREATE TABLE IF NOT EXISTS "public"."students" (
     "profile_insights" "jsonb" DEFAULT '{}'::"jsonb",
     "status" "public"."student_status" DEFAULT 'active'::"public"."student_status" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "survey_token" "text" DEFAULT ("gen_random_uuid"())::"text" NOT NULL,
+    "survey_responses" "jsonb",
+    "survey_completed_at" timestamp with time zone,
+    "linkedin_url" "text",
+    "personal_website" "text"
 );
 
 
 ALTER TABLE "public"."students" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."universities" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "name" "text" NOT NULL,
+    "url" "text",
+    "institution_type" "text",
+    "city" "text",
+    "state" "text",
+    "region" "text",
+    "undergraduate_size" integer,
+    "acceptance_rates" "jsonb" DEFAULT '{}'::"jsonb",
+    "us_news_ranking" "text",
+    "qs_world_ranking" integer,
+    "majors" "text"[] DEFAULT '{}'::"text"[],
+    "major_urls" "jsonb" DEFAULT '{}'::"jsonb",
+    "research" "jsonb" DEFAULT '[]'::"jsonb",
+    "clubs" "jsonb" DEFAULT '[]'::"jsonb",
+    "essay_hooks" "jsonb" DEFAULT '[]'::"jsonb",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "universities_institution_type_check" CHECK (("institution_type" = ANY (ARRAY['Private'::"text", 'Public'::"text"])))
+);
+
+
+ALTER TABLE "public"."universities" OWNER TO "postgres";
+
+
+ALTER TABLE ONLY "public"."action_items"
+    ADD CONSTRAINT "action_items_pkey" PRIMARY KEY ("id");
+
 
 
 ALTER TABLE ONLY "public"."activities"
@@ -613,18 +841,38 @@ ALTER TABLE ONLY "public"."activities"
 
 
 
-ALTER TABLE ONLY "public"."availability_overrides"
-    ADD CONSTRAINT "availability_overrides_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."availability_slots"
+    ADD CONSTRAINT "availability_slots_owner_type_owner_id_slot_date_slot_start_key" UNIQUE ("owner_type", "owner_id", "slot_date", "slot_start");
 
 
 
-ALTER TABLE ONLY "public"."availability_windows"
-    ADD CONSTRAINT "availability_windows_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."availability_slots"
+    ADD CONSTRAINT "availability_slots_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."awards"
+    ADD CONSTRAINT "awards_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."booking_students"
+    ADD CONSTRAINT "booking_students_booking_id_student_id_key" UNIQUE ("booking_id", "student_id");
+
+
+
+ALTER TABLE ONLY "public"."booking_students"
+    ADD CONSTRAINT "booking_students_pkey" PRIMARY KEY ("id");
 
 
 
 ALTER TABLE ONLY "public"."bookings"
     ADD CONSTRAINT "bookings_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."college_data_corrections"
+    ADD CONSTRAINT "college_data_corrections_pkey" PRIMARY KEY ("id");
 
 
 
@@ -635,6 +883,16 @@ ALTER TABLE ONLY "public"."college_lists"
 
 ALTER TABLE ONLY "public"."college_lists"
     ADD CONSTRAINT "college_lists_student_id_school_name_key" UNIQUE ("student_id", "school_name");
+
+
+
+ALTER TABLE ONLY "public"."college_suggestions"
+    ADD CONSTRAINT "college_suggestions_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."comments"
+    ADD CONSTRAINT "comments_pkey" PRIMARY KEY ("id");
 
 
 
@@ -658,6 +916,16 @@ ALTER TABLE ONLY "public"."documents"
 
 
 
+ALTER TABLE ONLY "public"."google_calendar_tokens"
+    ADD CONSTRAINT "google_calendar_tokens_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."google_calendar_tokens"
+    ADD CONSTRAINT "google_calendar_tokens_user_unique" UNIQUE ("user_id");
+
+
+
 ALTER TABLE ONLY "public"."notifications_log"
     ADD CONSTRAINT "notifications_log_pkey" PRIMARY KEY ("id");
 
@@ -673,13 +941,45 @@ ALTER TABLE ONLY "public"."scenarios"
 
 
 
+ALTER TABLE ONLY "public"."session_notes"
+    ADD CONSTRAINT "session_notes_booking_unique" UNIQUE ("booking_id");
+
+
+
+ALTER TABLE ONLY "public"."session_notes"
+    ADD CONSTRAINT "session_notes_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."students"
     ADD CONSTRAINT "students_pkey" PRIMARY KEY ("id");
 
 
 
 ALTER TABLE ONLY "public"."students"
-    ADD CONSTRAINT "students_user_id_key" UNIQUE ("user_id");
+    ADD CONSTRAINT "students_survey_token_key" UNIQUE ("survey_token");
+
+
+
+ALTER TABLE ONLY "public"."universities"
+    ADD CONSTRAINT "universities_name_key" UNIQUE ("name");
+
+
+
+ALTER TABLE ONLY "public"."universities"
+    ADD CONSTRAINT "universities_pkey" PRIMARY KEY ("id");
+
+
+
+CREATE INDEX "idx_action_items_booking" ON "public"."action_items" USING "btree" ("booking_id");
+
+
+
+CREATE INDEX "idx_action_items_client" ON "public"."action_items" USING "btree" ("client_id");
+
+
+
+CREATE INDEX "idx_action_items_counselor" ON "public"."action_items" USING "btree" ("counselor_id");
 
 
 
@@ -691,11 +991,19 @@ CREATE INDEX "idx_activities_student_id" ON "public"."activities" USING "btree" 
 
 
 
-CREATE INDEX "idx_availability_overrides_counselor_date" ON "public"."availability_overrides" USING "btree" ("counselor_id", "override_date");
+CREATE INDEX "idx_availability_slots_owner" ON "public"."availability_slots" USING "btree" ("owner_type", "owner_id", "slot_date");
 
 
 
-CREATE INDEX "idx_availability_windows_counselor" ON "public"."availability_windows" USING "btree" ("counselor_id");
+CREATE INDEX "idx_awards_student_id" ON "public"."awards" USING "btree" ("student_id");
+
+
+
+CREATE INDEX "idx_booking_students_booking" ON "public"."booking_students" USING "btree" ("booking_id");
+
+
+
+CREATE INDEX "idx_booking_students_student" ON "public"."booking_students" USING "btree" ("student_id");
 
 
 
@@ -712,6 +1020,26 @@ CREATE INDEX "idx_bookings_recurrence_group" ON "public"."bookings" USING "btree
 
 
 CREATE INDEX "idx_college_lists_student_id" ON "public"."college_lists" USING "btree" ("student_id");
+
+
+
+CREATE INDEX "idx_college_suggestions_status" ON "public"."college_suggestions" USING "btree" ("status") WHERE ("status" = 'pending'::"text");
+
+
+
+CREATE INDEX "idx_college_suggestions_student_id" ON "public"."college_suggestions" USING "btree" ("student_id");
+
+
+
+CREATE INDEX "idx_comments_parent_id" ON "public"."comments" USING "btree" ("parent_id") WHERE ("parent_id" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_comments_student_id" ON "public"."comments" USING "btree" ("student_id");
+
+
+
+CREATE INDEX "idx_comments_target" ON "public"."comments" USING "btree" ("target_type", "target_id") WHERE ("target_type" IS NOT NULL);
 
 
 
@@ -739,6 +1067,10 @@ CREATE INDEX "idx_documents_student_id" ON "public"."documents" USING "btree" ("
 
 
 
+CREATE INDEX "idx_google_calendar_tokens_user" ON "public"."google_calendar_tokens" USING "btree" ("user_id");
+
+
+
 CREATE INDEX "idx_notifications_booking" ON "public"."notifications_log" USING "btree" ("booking_id");
 
 
@@ -747,11 +1079,23 @@ CREATE INDEX "idx_scenarios_student_id" ON "public"."scenarios" USING "btree" ("
 
 
 
+CREATE INDEX "idx_session_notes_booking" ON "public"."session_notes" USING "btree" ("booking_id");
+
+
+
 CREATE INDEX "idx_students_counselor_id" ON "public"."students" USING "btree" ("counselor_id");
 
 
 
 CREATE INDEX "idx_students_user_id" ON "public"."students" USING "btree" ("user_id");
+
+
+
+CREATE INDEX "idx_universities_name" ON "public"."universities" USING "btree" ("name");
+
+
+
+CREATE INDEX "idx_universities_state" ON "public"."universities" USING "btree" ("state");
 
 
 
@@ -771,6 +1115,63 @@ CREATE OR REPLACE TRIGGER "set_students_updated_at" BEFORE UPDATE ON "public"."s
 
 
 
+CREATE OR REPLACE TRIGGER "set_universities_updated_at" BEFORE UPDATE ON "public"."universities" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_activities_delete_comments" AFTER DELETE ON "public"."activities" FOR EACH ROW EXECUTE FUNCTION "public"."delete_comments_for_target"('activity');
+
+
+
+CREATE OR REPLACE TRIGGER "trg_awards_delete_comments" AFTER DELETE ON "public"."awards" FOR EACH ROW EXECUTE FUNCTION "public"."delete_comments_for_target"('award');
+
+
+
+CREATE OR REPLACE TRIGGER "trg_courses_delete_comments" AFTER DELETE ON "public"."courses" FOR EACH ROW EXECUTE FUNCTION "public"."delete_comments_for_target"('course');
+
+
+
+CREATE OR REPLACE TRIGGER "update_action_items_updated_at" BEFORE UPDATE ON "public"."action_items" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_comments_updated_at" BEFORE UPDATE ON "public"."comments" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_google_calendar_tokens_updated_at" BEFORE UPDATE ON "public"."google_calendar_tokens" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_session_notes_updated_at" BEFORE UPDATE ON "public"."session_notes" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+ALTER TABLE ONLY "public"."action_items"
+    ADD CONSTRAINT "action_items_assigned_to_fkey" FOREIGN KEY ("assigned_to") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."action_items"
+    ADD CONSTRAINT "action_items_booking_id_fkey" FOREIGN KEY ("booking_id") REFERENCES "public"."bookings"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."action_items"
+    ADD CONSTRAINT "action_items_client_id_fkey" FOREIGN KEY ("client_id") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."action_items"
+    ADD CONSTRAINT "action_items_counselor_id_fkey" FOREIGN KEY ("counselor_id") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."action_items"
+    ADD CONSTRAINT "action_items_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "public"."profiles"("id");
+
+
+
 ALTER TABLE ONLY "public"."activities"
     ADD CONSTRAINT "activities_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE SET NULL;
 
@@ -781,13 +1182,18 @@ ALTER TABLE ONLY "public"."activities"
 
 
 
-ALTER TABLE ONLY "public"."availability_overrides"
-    ADD CONSTRAINT "availability_overrides_counselor_id_fkey" FOREIGN KEY ("counselor_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."awards"
+    ADD CONSTRAINT "awards_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."availability_windows"
-    ADD CONSTRAINT "availability_windows_counselor_id_fkey" FOREIGN KEY ("counselor_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."booking_students"
+    ADD CONSTRAINT "booking_students_booking_id_fkey" FOREIGN KEY ("booking_id") REFERENCES "public"."bookings"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."booking_students"
+    ADD CONSTRAINT "booking_students_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
 
 
 
@@ -801,8 +1207,58 @@ ALTER TABLE ONLY "public"."bookings"
 
 
 
+ALTER TABLE ONLY "public"."bookings"
+    ADD CONSTRAINT "bookings_proposed_by_fkey" FOREIGN KEY ("proposed_by") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."college_data_corrections"
+    ADD CONSTRAINT "college_data_corrections_resolved_by_fkey" FOREIGN KEY ("resolved_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "public"."college_data_corrections"
+    ADD CONSTRAINT "college_data_corrections_submitted_by_fkey" FOREIGN KEY ("submitted_by") REFERENCES "auth"."users"("id");
+
+
+
 ALTER TABLE ONLY "public"."college_lists"
     ADD CONSTRAINT "college_lists_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."college_suggestions"
+    ADD CONSTRAINT "college_suggestions_college_list_id_fkey" FOREIGN KEY ("college_list_id") REFERENCES "public"."college_lists"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."college_suggestions"
+    ADD CONSTRAINT "college_suggestions_resolved_by_fkey" FOREIGN KEY ("resolved_by") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."college_suggestions"
+    ADD CONSTRAINT "college_suggestions_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."college_suggestions"
+    ADD CONSTRAINT "college_suggestions_suggested_by_fkey" FOREIGN KEY ("suggested_by") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."comments"
+    ADD CONSTRAINT "comments_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."comments"
+    ADD CONSTRAINT "comments_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "public"."comments"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."comments"
+    ADD CONSTRAINT "comments_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
 
 
 
@@ -826,8 +1282,18 @@ ALTER TABLE ONLY "public"."documents"
 
 
 
+ALTER TABLE ONLY "public"."google_calendar_tokens"
+    ADD CONSTRAINT "google_calendar_tokens_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."notifications_log"
     ADD CONSTRAINT "notifications_log_booking_id_fkey" FOREIGN KEY ("booking_id") REFERENCES "public"."bookings"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."notifications_log"
+    ADD CONSTRAINT "notifications_log_recipient_id_fkey" FOREIGN KEY ("recipient_id") REFERENCES "public"."profiles"("id");
 
 
 
@@ -846,6 +1312,16 @@ ALTER TABLE ONLY "public"."scenarios"
 
 
 
+ALTER TABLE ONLY "public"."session_notes"
+    ADD CONSTRAINT "session_notes_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."session_notes"
+    ADD CONSTRAINT "session_notes_booking_id_fkey" FOREIGN KEY ("booking_id") REFERENCES "public"."bookings"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."students"
     ADD CONSTRAINT "students_counselor_id_fkey" FOREIGN KEY ("counselor_id") REFERENCES "public"."profiles"("id");
 
@@ -860,7 +1336,7 @@ CREATE POLICY "Admins can delete students" ON "public"."students" FOR DELETE USI
 
 
 
-CREATE POLICY "Admins can manage all availability" ON "public"."availability_windows" USING (("public"."current_user_role"() = 'admin'::"public"."user_role"));
+CREATE POLICY "Admins can manage action items" ON "public"."action_items" USING (("public"."current_user_role"() = 'admin'::"public"."user_role"));
 
 
 
@@ -868,11 +1344,19 @@ CREATE POLICY "Admins can manage all bookings" ON "public"."bookings" USING (("p
 
 
 
-CREATE POLICY "Admins can manage all overrides" ON "public"."availability_overrides" USING (("public"."current_user_role"() = 'admin'::"public"."user_role"));
+CREATE POLICY "Admins can manage availability slots" ON "public"."availability_slots" USING (("public"."current_user_role"() = 'admin'::"public"."user_role")) WITH CHECK (("public"."current_user_role"() = 'admin'::"public"."user_role"));
+
+
+
+CREATE POLICY "Admins can manage booking students" ON "public"."booking_students" USING (("public"."current_user_role"() = 'admin'::"public"."user_role")) WITH CHECK (("public"."current_user_role"() = 'admin'::"public"."user_role"));
 
 
 
 CREATE POLICY "Admins can manage invites" ON "public"."counselor_invites" USING (("public"."current_user_role"() = 'admin'::"public"."user_role"));
+
+
+
+CREATE POLICY "Admins can manage session notes" ON "public"."session_notes" USING (("public"."current_user_role"() = 'admin'::"public"."user_role"));
 
 
 
@@ -888,15 +1372,27 @@ CREATE POLICY "Admins can update any profile" ON "public"."profiles" FOR UPDATE 
 
 
 
-CREATE POLICY "Anyone can read availability" ON "public"."availability_windows" FOR SELECT USING (true);
+CREATE POLICY "Admins can update corrections" ON "public"."college_data_corrections" FOR UPDATE TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = ANY (ARRAY['admin'::"public"."user_role", 'counselor'::"public"."user_role"]))))));
 
 
 
-CREATE POLICY "Anyone can read overrides" ON "public"."availability_overrides" FOR SELECT USING (true);
+CREATE POLICY "Admins see all corrections" ON "public"."college_data_corrections" FOR SELECT TO "authenticated" USING (((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = ANY (ARRAY['admin'::"public"."user_role", 'counselor'::"public"."user_role"]))))) OR ("submitted_by" = "auth"."uid"())));
 
 
 
 CREATE POLICY "Anyone can read profiles" ON "public"."profiles" FOR SELECT USING (true);
+
+
+
+CREATE POLICY "Anyone can submit corrections" ON "public"."college_data_corrections" FOR INSERT TO "authenticated" WITH CHECK (("submitted_by" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Anyone can view universities" ON "public"."universities" FOR SELECT USING (true);
 
 
 
@@ -908,7 +1404,45 @@ CREATE POLICY "Clients can create bookings" ON "public"."bookings" FOR INSERT WI
 
 
 
+CREATE POLICY "Clients can read action items" ON "public"."action_items" FOR SELECT USING (("client_id" = "auth"."uid"()));
+
+
+
 CREATE POLICY "Clients can read own bookings" ON "public"."bookings" FOR SELECT USING (("client_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Clients can read session notes" ON "public"."session_notes" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "public"."bookings" "b"
+  WHERE (("b"."id" = "session_notes"."booking_id") AND ("b"."client_id" = "auth"."uid"())))));
+
+
+
+CREATE POLICY "Clients can update action item status" ON "public"."action_items" FOR UPDATE USING (("client_id" = "auth"."uid"())) WITH CHECK (("client_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Counselors can add to college list" ON "public"."college_lists" FOR INSERT WITH CHECK (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors can delete action items" ON "public"."action_items" FOR DELETE USING (("counselor_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Counselors can delete session notes" ON "public"."session_notes" FOR DELETE USING ((("author_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+   FROM "public"."bookings" "b"
+  WHERE (("b"."id" = "session_notes"."booking_id") AND ("b"."counselor_id" = "auth"."uid"()))))));
+
+
+
+CREATE POLICY "Counselors can insert action items" ON "public"."action_items" FOR INSERT WITH CHECK ((("counselor_id" = "auth"."uid"()) AND ("created_by" = "auth"."uid"())));
+
+
+
+CREATE POLICY "Counselors can insert session notes" ON "public"."session_notes" FOR INSERT WITH CHECK ((("author_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+   FROM "public"."bookings" "b"
+  WHERE (("b"."id" = "session_notes"."booking_id") AND ("b"."counselor_id" = "auth"."uid"()))))));
 
 
 
@@ -916,23 +1450,37 @@ CREATE POLICY "Counselors can insert students" ON "public"."students" FOR INSERT
 
 
 
-CREATE POLICY "Counselors can manage activities" ON "public"."activities" USING ("public"."can_access_student"("student_id")) WITH CHECK (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
+CREATE POLICY "Counselors can manage booking students" ON "public"."booking_students" USING ((("public"."current_user_role"() = 'counselor'::"public"."user_role") AND "public"."can_access_student"("student_id"))) WITH CHECK ((("public"."current_user_role"() = 'counselor'::"public"."user_role") AND "public"."can_access_student"("student_id")));
 
 
 
-CREATE POLICY "Counselors can manage courses" ON "public"."courses" USING ("public"."can_access_student"("student_id")) WITH CHECK (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
+CREATE POLICY "Counselors can manage universities" ON "public"."universities" USING (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
 
 
 
-CREATE POLICY "Counselors can manage own availability" ON "public"."availability_windows" USING ((("counselor_id" = "auth"."uid"()) AND ("public"."current_user_role"() = 'counselor'::"public"."user_role"))) WITH CHECK (("counselor_id" = "auth"."uid"()));
-
-
-
-CREATE POLICY "Counselors can manage own overrides" ON "public"."availability_overrides" USING ((("counselor_id" = "auth"."uid"()) AND ("public"."current_user_role"() = 'counselor'::"public"."user_role"))) WITH CHECK (("counselor_id" = "auth"."uid"()));
+CREATE POLICY "Counselors can read action items" ON "public"."action_items" FOR SELECT USING (("counselor_id" = "auth"."uid"()));
 
 
 
 CREATE POLICY "Counselors can read assigned bookings" ON "public"."bookings" FOR SELECT USING (("counselor_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Counselors can read session notes" ON "public"."session_notes" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "public"."bookings" "b"
+  WHERE (("b"."id" = "session_notes"."booking_id") AND ("b"."counselor_id" = "auth"."uid"())))));
+
+
+
+CREATE POLICY "Counselors can remove from college list" ON "public"."college_lists" FOR DELETE USING (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors can resolve suggestions" ON "public"."college_suggestions" FOR UPDATE USING (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors can update action items" ON "public"."action_items" FOR UPDATE USING (("counselor_id" = "auth"."uid"())) WITH CHECK (("counselor_id" = "auth"."uid"()));
 
 
 
@@ -944,11 +1492,91 @@ CREATE POLICY "Counselors can update assigned students" ON "public"."students" F
 
 
 
+CREATE POLICY "Counselors can update college list" ON "public"."college_lists" FOR UPDATE USING (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors can update session notes" ON "public"."session_notes" FOR UPDATE USING ((("author_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+   FROM "public"."bookings" "b"
+  WHERE (("b"."id" = "session_notes"."booking_id") AND ("b"."counselor_id" = "auth"."uid"())))))) WITH CHECK ((("author_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
+   FROM "public"."bookings" "b"
+  WHERE (("b"."id" = "session_notes"."booking_id") AND ("b"."counselor_id" = "auth"."uid"()))))));
+
+
+
+CREATE POLICY "Counselors can view suggestions" ON "public"."college_suggestions" FOR SELECT USING (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors manage own availability slots" ON "public"."availability_slots" USING ((("owner_type" = 'counselor'::"text") AND ("owner_id" = "auth"."uid"()))) WITH CHECK ((("owner_type" = 'counselor'::"text") AND ("owner_id" = "auth"."uid"())));
+
+
+
+CREATE POLICY "Counselors read student availability slots" ON "public"."availability_slots" FOR SELECT USING ((("owner_type" = 'student'::"text") AND ("owner_id" IN ( SELECT "students"."id"
+   FROM "public"."students"
+  WHERE ("students"."counselor_id" = "auth"."uid"())))));
+
+
+
+CREATE POLICY "Parents can create suggestions" ON "public"."college_suggestions" FOR INSERT WITH CHECK (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND ("suggested_by" = "auth"."uid"())));
+
+
+
+CREATE POLICY "Parents can insert students" ON "public"."students" FOR INSERT WITH CHECK ((("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND ("user_id" = "auth"."uid"()) AND ("status" = 'pending_approval'::"public"."student_status")));
+
+
+
+CREATE POLICY "Parents can read booking students" ON "public"."booking_students" FOR SELECT USING ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Parents can update unassigned students" ON "public"."students" FOR UPDATE USING ((("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND ("user_id" = "auth"."uid"()) AND ("counselor_id" IS NULL) AND ("status" = 'pending_approval'::"public"."student_status"))) WITH CHECK ((("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND ("user_id" = "auth"."uid"()) AND ("status" = 'pending_approval'::"public"."student_status")));
+
+
+
+CREATE POLICY "Parents can view own suggestions" ON "public"."college_suggestions" FOR SELECT USING (("suggested_by" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Parents manage child availability slots" ON "public"."availability_slots" USING ((("owner_type" = 'student'::"text") AND ("owner_id" IN ( SELECT "students"."id"
+   FROM "public"."students"
+  WHERE ("students"."user_id" = "auth"."uid"()))))) WITH CHECK ((("owner_type" = 'student'::"text") AND ("owner_id" IN ( SELECT "students"."id"
+   FROM "public"."students"
+  WHERE ("students"."user_id" = "auth"."uid"())))));
+
+
+
+CREATE POLICY "Parents read counselor availability slots" ON "public"."availability_slots" FOR SELECT USING ((("owner_type" = 'counselor'::"text") AND ("owner_id" IN ( SELECT DISTINCT "students"."counselor_id"
+   FROM "public"."students"
+  WHERE ("students"."user_id" = "auth"."uid"())))));
+
+
+
 CREATE POLICY "Public can verify pending invite" ON "public"."counselor_invites" FOR SELECT USING (("status" = 'pending'::"text"));
 
 
 
-CREATE POLICY "Users can add to college list" ON "public"."college_lists" FOR INSERT WITH CHECK ("public"."can_access_student"("student_id"));
+CREATE POLICY "Users can add comments for accessible students" ON "public"."comments" FOR INSERT WITH CHECK (("public"."can_access_student"("student_id") AND ("author_id" = "auth"."uid"())));
+
+
+
+CREATE POLICY "Users can delete activities for accessible students" ON "public"."activities" FOR DELETE USING ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can delete awards for accessible students" ON "public"."awards" FOR DELETE USING ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can delete courses for accessible students" ON "public"."courses" FOR DELETE USING ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can delete own calendar tokens" ON "public"."google_calendar_tokens" FOR DELETE USING (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Users can delete own comments" ON "public"."comments" FOR DELETE USING (("author_id" = "auth"."uid"()));
 
 
 
@@ -956,11 +1584,43 @@ CREATE POLICY "Users can delete own documents" ON "public"."documents" FOR DELET
 
 
 
-CREATE POLICY "Users can remove from college list" ON "public"."college_lists" FOR DELETE USING ("public"."can_access_student"("student_id"));
+CREATE POLICY "Users can edit own comments" ON "public"."comments" FOR UPDATE USING (("author_id" = "auth"."uid"())) WITH CHECK (("author_id" = "auth"."uid"()));
 
 
 
-CREATE POLICY "Users can update college list" ON "public"."college_lists" FOR UPDATE USING ("public"."can_access_student"("student_id"));
+CREATE POLICY "Users can insert activities for accessible students" ON "public"."activities" FOR INSERT WITH CHECK ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can insert awards for accessible students" ON "public"."awards" FOR INSERT WITH CHECK ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can insert courses for accessible students" ON "public"."courses" FOR INSERT WITH CHECK ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can insert own calendar tokens" ON "public"."google_calendar_tokens" FOR INSERT WITH CHECK (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Users can read own calendar tokens" ON "public"."google_calendar_tokens" FOR SELECT USING (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Users can update activities for accessible students" ON "public"."activities" FOR UPDATE USING ("public"."can_access_student"("student_id")) WITH CHECK ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can update awards for accessible students" ON "public"."awards" FOR UPDATE USING ("public"."can_access_student"("student_id")) WITH CHECK ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can update courses for accessible students" ON "public"."courses" FOR UPDATE USING ("public"."can_access_student"("student_id")) WITH CHECK ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can update own calendar tokens" ON "public"."google_calendar_tokens" FOR UPDATE USING (("user_id" = "auth"."uid"())) WITH CHECK (("user_id" = "auth"."uid"()));
 
 
 
@@ -975,6 +1635,14 @@ CREATE POLICY "Users can update own profile (not role)" ON "public"."profiles" F
 
 
 CREATE POLICY "Users can upload documents" ON "public"."documents" FOR INSERT WITH CHECK ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can view awards for accessible students" ON "public"."awards" FOR SELECT USING ("public"."can_access_student"("student_id"));
+
+
+
+CREATE POLICY "Users can view comments for accessible students" ON "public"."comments" FOR SELECT USING ("public"."can_access_student"("student_id"));
 
 
 
@@ -998,6 +1666,9 @@ CREATE POLICY "Users can view own student record" ON "public"."students" FOR SEL
 
 
 
+ALTER TABLE "public"."action_items" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."activities" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1007,16 +1678,28 @@ CREATE POLICY "admins_delete_scenarios" ON "public"."scenarios" FOR DELETE USING
 
 
 
-ALTER TABLE "public"."availability_overrides" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."availability_slots" ENABLE ROW LEVEL SECURITY;
 
 
-ALTER TABLE "public"."availability_windows" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."awards" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."booking_students" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."bookings" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."college_data_corrections" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."college_lists" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."college_suggestions" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."comments" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."counselor_invites" ENABLE ROW LEVEL SECURITY;
@@ -1044,6 +1727,9 @@ ALTER TABLE "public"."courses" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."documents" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."google_calendar_tokens" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."notifications_log" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1053,7 +1739,13 @@ ALTER TABLE "public"."profiles" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."scenarios" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."session_notes" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."students" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."universities" ENABLE ROW LEVEL SECURITY;
 
 
 
@@ -1257,15 +1949,29 @@ GRANT ALL ON FUNCTION "public"."current_user_role"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."get_available_slots"("p_counselor_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "anon";
-GRANT ALL ON FUNCTION "public"."get_available_slots"("p_counselor_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."get_available_slots"("p_counselor_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "service_role";
+GRANT ALL ON FUNCTION "public"."delete_comments_for_target"() TO "anon";
+GRANT ALL ON FUNCTION "public"."delete_comments_for_target"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."delete_comments_for_target"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "service_role";
 
 
 
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "anon";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."send_auth_email"("event" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."send_auth_email"("event" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."send_auth_email"("event" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."send_auth_email"("event" "jsonb") TO "service_role";
+GRANT ALL ON FUNCTION "public"."send_auth_email"("event" "jsonb") TO "supabase_auth_admin";
 
 
 
@@ -1296,21 +2002,33 @@ GRANT ALL ON FUNCTION "public"."update_updated_at"() TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."action_items" TO "anon";
+GRANT ALL ON TABLE "public"."action_items" TO "authenticated";
+GRANT ALL ON TABLE "public"."action_items" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."activities" TO "anon";
 GRANT ALL ON TABLE "public"."activities" TO "authenticated";
 GRANT ALL ON TABLE "public"."activities" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."availability_overrides" TO "anon";
-GRANT ALL ON TABLE "public"."availability_overrides" TO "authenticated";
-GRANT ALL ON TABLE "public"."availability_overrides" TO "service_role";
+GRANT ALL ON TABLE "public"."availability_slots" TO "anon";
+GRANT ALL ON TABLE "public"."availability_slots" TO "authenticated";
+GRANT ALL ON TABLE "public"."availability_slots" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."availability_windows" TO "anon";
-GRANT ALL ON TABLE "public"."availability_windows" TO "authenticated";
-GRANT ALL ON TABLE "public"."availability_windows" TO "service_role";
+GRANT ALL ON TABLE "public"."awards" TO "anon";
+GRANT ALL ON TABLE "public"."awards" TO "authenticated";
+GRANT ALL ON TABLE "public"."awards" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."booking_students" TO "anon";
+GRANT ALL ON TABLE "public"."booking_students" TO "authenticated";
+GRANT ALL ON TABLE "public"."booking_students" TO "service_role";
 
 
 
@@ -1320,9 +2038,27 @@ GRANT ALL ON TABLE "public"."bookings" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."college_data_corrections" TO "anon";
+GRANT ALL ON TABLE "public"."college_data_corrections" TO "authenticated";
+GRANT ALL ON TABLE "public"."college_data_corrections" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."college_lists" TO "anon";
 GRANT ALL ON TABLE "public"."college_lists" TO "authenticated";
 GRANT ALL ON TABLE "public"."college_lists" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."college_suggestions" TO "anon";
+GRANT ALL ON TABLE "public"."college_suggestions" TO "authenticated";
+GRANT ALL ON TABLE "public"."college_suggestions" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."comments" TO "anon";
+GRANT ALL ON TABLE "public"."comments" TO "authenticated";
+GRANT ALL ON TABLE "public"."comments" TO "service_role";
 
 
 
@@ -1344,6 +2080,12 @@ GRANT ALL ON TABLE "public"."documents" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."google_calendar_tokens" TO "anon";
+GRANT ALL ON TABLE "public"."google_calendar_tokens" TO "authenticated";
+GRANT ALL ON TABLE "public"."google_calendar_tokens" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."notifications_log" TO "anon";
 GRANT ALL ON TABLE "public"."notifications_log" TO "authenticated";
 GRANT ALL ON TABLE "public"."notifications_log" TO "service_role";
@@ -1362,9 +2104,21 @@ GRANT ALL ON TABLE "public"."scenarios" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."session_notes" TO "anon";
+GRANT ALL ON TABLE "public"."session_notes" TO "authenticated";
+GRANT ALL ON TABLE "public"."session_notes" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."students" TO "anon";
 GRANT ALL ON TABLE "public"."students" TO "authenticated";
 GRANT ALL ON TABLE "public"."students" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."universities" TO "anon";
+GRANT ALL ON TABLE "public"."universities" TO "authenticated";
+GRANT ALL ON TABLE "public"."universities" TO "service_role";
 
 
 
