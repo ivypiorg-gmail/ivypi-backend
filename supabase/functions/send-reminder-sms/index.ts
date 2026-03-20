@@ -52,7 +52,7 @@ Deno.serve(async (req: Request) => {
         .from("notifications_log")
         .select("id")
         .eq("booking_id", booking.id)
-        .eq("notification_type", "reminder_30m")
+        .eq("type", "reminder_30m")
         .eq("channel", "sms")
         .limit(1);
 
@@ -124,7 +124,8 @@ Deno.serve(async (req: Request) => {
         .insert({
           booking_id: booking.id,
           recipient_id: client.id,
-          notification_type: "reminder_30m",
+          recipient: client.phone,
+          type: "reminder_30m",
           channel: "sms",
           status: "sent",
         });

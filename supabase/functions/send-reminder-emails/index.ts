@@ -51,7 +51,7 @@ Deno.serve(async (req: Request) => {
         .from("notifications_log")
         .select("id")
         .eq("booking_id", booking.id)
-        .eq("notification_type", "reminder_24h")
+        .eq("type", "reminder_24h")
         .limit(1);
 
       if (existingLog && existingLog.length > 0) {
@@ -136,14 +136,16 @@ Deno.serve(async (req: Request) => {
           {
             booking_id: booking.id,
             recipient_id: client.id,
-            notification_type: "reminder_24h",
+            recipient: client.email,
+            type: "reminder_24h",
             channel: "email",
             status: "sent",
           },
           {
             booking_id: booking.id,
             recipient_id: counselor.id,
-            notification_type: "reminder_24h",
+            recipient: counselor.email,
+            type: "reminder_24h",
             channel: "email",
             status: "sent",
           },

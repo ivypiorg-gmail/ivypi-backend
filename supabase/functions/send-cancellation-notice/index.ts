@@ -116,7 +116,8 @@ Deno.serve(async (req: Request) => {
       .insert({
         booking_id,
         recipient_id: recipient.id,
-        notification_type: "cancellation",
+        recipient: recipient.email,
+        type: "cancellation",
         channel: "email",
         status: "sent",
         metadata: { cancelled_by },

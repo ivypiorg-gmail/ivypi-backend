@@ -127,14 +127,16 @@ Deno.serve(async (req: Request) => {
       {
         booking_id,
         recipient_id: client.id,
-        notification_type: "booking_confirmation",
+        recipient: client.email,
+        type: "confirmation",
         channel: "email",
         status: "sent",
       },
       {
         booking_id,
         recipient_id: counselor.id,
-        notification_type: "booking_confirmation",
+        recipient: counselor.email,
+        type: "confirmation",
         channel: "email",
         status: "sent",
       },
