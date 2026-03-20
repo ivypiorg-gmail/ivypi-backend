@@ -316,3 +316,55 @@ export function emailChange(newEmail: string, confirmUrl: string): string {
     <p style="margin:24px 0 0;font-size:13px;color:${BRAND.textMuted};line-height:1.5;">If you didn't request this change, please secure your account by resetting your password immediately.</p>
   `);
 }
+
+// ── Deadline Daemon Templates ──
+
+export function deadlineReminder7d(
+  parentName: string,
+  studentName: string,
+  schoolName: string,
+  deadlineType: string,
+  dueDate: string,
+): string {
+  const typeLabel = deadlineType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return layout(`
+    <h2 style="color:#1a2b4a;font-size:20px;margin:0 0 16px">Upcoming Deadline</h2>
+    <p style="color:#4a5568;font-size:15px;line-height:1.6;margin:0 0 12px">
+      Hi ${parentName},
+    </p>
+    <p style="color:#4a5568;font-size:15px;line-height:1.6;margin:0 0 20px">
+      ${studentName} has an upcoming deadline in <strong>7 days</strong>:
+    </p>
+    <div style="background:#f7f8fa;border-radius:8px;padding:16px;margin:0 0 20px">
+      <p style="margin:0 0 4px;font-size:15px;font-weight:600;color:#1a2b4a">${schoolName}</p>
+      <p style="margin:0 0 4px;font-size:14px;color:#4a5568">${typeLabel}</p>
+      <p style="margin:0;font-size:14px;color:#4a5568">Due: <strong>${dueDate}</strong></p>
+    </div>
+    ${dashboardButton("View Timeline")}
+  `);
+}
+
+export function deadlineReminder2d(
+  parentName: string,
+  studentName: string,
+  schoolName: string,
+  deadlineType: string,
+  dueDate: string,
+): string {
+  const typeLabel = deadlineType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return layout(`
+    <h2 style="color:#1a2b4a;font-size:20px;margin:0 0 16px">Deadline in 2 Days</h2>
+    <p style="color:#4a5568;font-size:15px;line-height:1.6;margin:0 0 12px">
+      Hi ${parentName},
+    </p>
+    <p style="color:#4a5568;font-size:15px;line-height:1.6;margin:0 0 20px">
+      ${studentName} has a deadline due in <strong>2 days</strong>:
+    </p>
+    <div style="background:#fff5f5;border-radius:8px;padding:16px;margin:0 0 20px;border-left:4px solid #e53e3e">
+      <p style="margin:0 0 4px;font-size:15px;font-weight:600;color:#1a2b4a">${schoolName}</p>
+      <p style="margin:0 0 4px;font-size:14px;color:#4a5568">${typeLabel}</p>
+      <p style="margin:0;font-size:14px;color:#e53e3e;font-weight:600">Due: ${dueDate}</p>
+    </div>
+    ${dashboardButton("View Timeline")}
+  `);
+}
