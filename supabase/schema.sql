@@ -66,6 +66,13 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+CREATE EXTENSION IF NOT EXISTS "vector" WITH SCHEMA "public";
+
+
+
+
+
+
 CREATE TYPE "public"."action_item_status" AS ENUM (
     'open',
     'in_progress',
@@ -107,13 +114,11 @@ ALTER TYPE "public"."app_status" OWNER TO "postgres";
 
 
 CREATE TYPE "public"."booking_status" AS ENUM (
-    'proposed',
     'confirmed',
     'cancelled_by_client',
     'cancelled_by_counselor',
     'completed',
-    'no_show',
-    'declined'
+    'no_show'
 );
 
 
@@ -165,11 +170,23 @@ CREATE TYPE "public"."document_type" AS ENUM (
 ALTER TYPE "public"."document_type" OWNER TO "postgres";
 
 
+CREATE TYPE "public"."narrative_stage" AS ENUM (
+    'academic',
+    'activities',
+    'full'
+);
+
+
+ALTER TYPE "public"."narrative_stage" OWNER TO "postgres";
+
+
 CREATE TYPE "public"."notification_type" AS ENUM (
     'confirmation',
     'reminder_24h',
     'cancellation',
-    'reminder_30m'
+    'reminder_30m',
+    'deadline_reminder_7d',
+    'deadline_reminder_2d'
 );
 
 
@@ -292,34 +309,6 @@ $$;
 ALTER FUNCTION "public"."delete_comments_for_target"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") RETURNS TABLE("slot_date" "date", "slot_start" time without time zone)
-    LANGUAGE "sql" STABLE
-    AS $$
-  SELECT c.slot_date, c.slot_start
-  FROM public.availability_slots c
-  JOIN public.availability_slots s
-    ON  s.slot_date  = c.slot_date
-    AND s.slot_start = c.slot_start
-  WHERE c.owner_type = 'counselor'
-    AND c.owner_id   = p_counselor_id
-    AND s.owner_type = 'student'
-    AND s.owner_id   = p_student_id
-    AND c.slot_date BETWEEN p_start_date AND p_end_date
-    -- Exclude slots where a confirmed booking already exists.
-    AND NOT EXISTS (
-      SELECT 1 FROM public.bookings b
-      WHERE b.counselor_id = p_counselor_id
-        AND b.status = 'confirmed'
-        AND (c.slot_date + c.slot_start) AT TIME ZONE 'UTC' < b.ends_at
-        AND (c.slot_date + c.slot_start + interval '30 minutes') AT TIME ZONE 'UTC' > b.starts_at
-    )
-  ORDER BY c.slot_date, c.slot_start;
-$$;
-
-
-ALTER FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") OWNER TO "postgres";
-
-
 CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -405,6 +394,20 @@ $$;
 ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."mark_timeline_stale"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  UPDATE strategic_timelines SET stale = true
+  WHERE student_id = COALESCE(NEW.student_id, OLD.student_id);
+  RETURN NULL;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."mark_timeline_stale"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."send_auth_email"("event" "jsonb") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -462,6 +465,53 @@ $$;
 ALTER FUNCTION "public"."send_auth_email"("event" "jsonb") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."set_profile_stale"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    UPDATE students SET profile_stale = true WHERE id = OLD.student_id;
+    RETURN OLD;
+  ELSE
+    UPDATE students SET profile_stale = true WHERE id = NEW.student_id;
+    RETURN NEW;
+  END IF;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_profile_stale"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."set_profile_stale_on_student_update"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+  IF (OLD.test_scores IS DISTINCT FROM NEW.test_scores)
+     OR (OLD.survey_responses IS DISTINCT FROM NEW.survey_responses) THEN
+    NEW.profile_stale := true;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_profile_stale_on_student_update"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."set_updated_at"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_updated_at"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."update_updated_at"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -517,11 +567,31 @@ CREATE TABLE IF NOT EXISTS "public"."activities" (
     "activity_type" "text",
     "sort_order" integer,
     "uc_description" "text",
-    "resume_bullets" "text"
+    "resume_bullets" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
 );
 
 
 ALTER TABLE "public"."activities" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."ai_usage_log" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "function_name" "text" NOT NULL,
+    "student_id" "uuid",
+    "school_id" "uuid",
+    "model" "text" NOT NULL,
+    "input_tokens" integer NOT NULL,
+    "output_tokens" integer NOT NULL,
+    "cost_usd" numeric(10,6),
+    "caller_id" "uuid",
+    "metadata" "jsonb" DEFAULT '{}'::"jsonb",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."ai_usage_log" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."availability_slots" (
@@ -547,7 +617,8 @@ CREATE TABLE IF NOT EXISTS "public"."awards" (
     "grade_year" integer,
     "description" "text",
     "sort_order" integer,
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
 );
 
 
@@ -576,7 +647,6 @@ CREATE TABLE IF NOT EXISTS "public"."bookings" (
     "notes" "text",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "proposed_by" "uuid",
     "google_calendar_event_id" "text",
     CONSTRAINT "valid_booking_range" CHECK (("ends_at" > "starts_at"))
 );
@@ -678,7 +748,9 @@ CREATE TABLE IF NOT EXISTS "public"."courses" (
     "grade" "text",
     "year" "text",
     "semester" "text",
-    "course_type" "public"."course_type" DEFAULT 'high_school'::"public"."course_type"
+    "course_type" "public"."course_type" DEFAULT 'high_school'::"public"."course_type",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
 );
 
 
@@ -717,6 +789,39 @@ CREATE TABLE IF NOT EXISTS "public"."google_calendar_tokens" (
 ALTER TABLE "public"."google_calendar_tokens" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."narrative_annotations" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "student_id" "uuid" NOT NULL,
+    "author_id" "uuid" NOT NULL,
+    "target_type" "text" NOT NULL,
+    "target_key" "text" NOT NULL,
+    "body" "text" NOT NULL,
+    "audio_url" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "narrative_annotations_target_type_check" CHECK (("target_type" = ANY (ARRAY['throughline'::"text", 'contradiction'::"text", 'gap'::"text", 'identity_frame'::"text"])))
+);
+
+
+ALTER TABLE "public"."narrative_annotations" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."narrative_arcs" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "student_id" "uuid" NOT NULL,
+    "arc" "jsonb" NOT NULL,
+    "stage" "public"."narrative_stage" NOT NULL,
+    "generated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "status" "text" DEFAULT 'idle'::"text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "narrative_arcs_status_check" CHECK (("status" = ANY (ARRAY['idle'::"text", 'generating'::"text", 'failed'::"text"])))
+);
+
+
+ALTER TABLE "public"."narrative_arcs" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."notifications_log" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "booking_id" "uuid",
@@ -726,7 +831,8 @@ CREATE TABLE IF NOT EXISTS "public"."notifications_log" (
     "status" "text" DEFAULT 'sent'::"text" NOT NULL,
     "recipient_id" "uuid",
     "channel" "text" DEFAULT 'email'::"text",
-    "metadata" "jsonb" DEFAULT '{}'::"jsonb"
+    "metadata" "jsonb" DEFAULT '{}'::"jsonb",
+    "student_deadline_id" "uuid"
 );
 
 
@@ -765,6 +871,39 @@ CREATE TABLE IF NOT EXISTS "public"."scenarios" (
 ALTER TABLE "public"."scenarios" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."school_deadlines" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "school_name" "text" NOT NULL,
+    "deadline_type" "text" NOT NULL,
+    "deadline_date" "date" NOT NULL,
+    "description" "text",
+    "source_url" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "verified" boolean DEFAULT false NOT NULL,
+    "verified_by" "uuid",
+    "cycle_year" integer
+);
+
+
+ALTER TABLE "public"."school_deadlines" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."school_knowledge_chunks" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "school_name" "text" NOT NULL,
+    "chunk_type" "text" NOT NULL,
+    "content" "text" NOT NULL,
+    "embedding" "public"."vector"(1536),
+    "metadata" "jsonb" DEFAULT '{}'::"jsonb",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."school_knowledge_chunks" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."session_notes" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "booking_id" "uuid" NOT NULL,
@@ -778,6 +917,44 @@ CREATE TABLE IF NOT EXISTS "public"."session_notes" (
 
 
 ALTER TABLE "public"."session_notes" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."strategic_timelines" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "student_id" "uuid" NOT NULL,
+    "narrative_brief" "text",
+    "risk_flags" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "sequenced_tasks" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "status" "text" DEFAULT 'idle'::"text" NOT NULL,
+    "stale" boolean DEFAULT false NOT NULL,
+    "generated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "strategic_timelines_status_check" CHECK (("status" = ANY (ARRAY['idle'::"text", 'generating'::"text", 'failed'::"text"])))
+);
+
+
+ALTER TABLE "public"."strategic_timelines" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."student_deadlines" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "student_id" "uuid" NOT NULL,
+    "school_deadline_id" "uuid",
+    "title" "text" NOT NULL,
+    "due_date" "date" NOT NULL,
+    "status" "text" DEFAULT 'pending'::"text" NOT NULL,
+    "notes" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "deadline_type" "text",
+    "school_name" "text",
+    "priority" "text" DEFAULT 'normal'::"text" NOT NULL,
+    "created_by" "uuid"
+);
+
+
+ALTER TABLE "public"."student_deadlines" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."students" (
@@ -798,7 +975,11 @@ CREATE TABLE IF NOT EXISTS "public"."students" (
     "survey_responses" "jsonb",
     "survey_completed_at" timestamp with time zone,
     "linkedin_url" "text",
-    "personal_website" "text"
+    "personal_website" "text",
+    "profile_stale" boolean DEFAULT false NOT NULL,
+    "narrative_arc" "jsonb",
+    "narrative_arc_generated_at" timestamp with time zone,
+    "narrative_arc_shared_keys" "text"[] DEFAULT '{}'::"text"[] NOT NULL
 );
 
 
@@ -838,6 +1019,11 @@ ALTER TABLE ONLY "public"."action_items"
 
 ALTER TABLE ONLY "public"."activities"
     ADD CONSTRAINT "activities_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."ai_usage_log"
+    ADD CONSTRAINT "ai_usage_log_pkey" PRIMARY KEY ("id");
 
 
 
@@ -926,6 +1112,21 @@ ALTER TABLE ONLY "public"."google_calendar_tokens"
 
 
 
+ALTER TABLE ONLY "public"."narrative_annotations"
+    ADD CONSTRAINT "narrative_annotations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."narrative_arcs"
+    ADD CONSTRAINT "narrative_arcs_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."narrative_arcs"
+    ADD CONSTRAINT "narrative_arcs_student_id_key" UNIQUE ("student_id");
+
+
+
 ALTER TABLE ONLY "public"."notifications_log"
     ADD CONSTRAINT "notifications_log_pkey" PRIMARY KEY ("id");
 
@@ -941,6 +1142,21 @@ ALTER TABLE ONLY "public"."scenarios"
 
 
 
+ALTER TABLE ONLY "public"."school_deadlines"
+    ADD CONSTRAINT "school_deadlines_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."school_deadlines"
+    ADD CONSTRAINT "school_deadlines_unique_school_type_year" UNIQUE ("school_name", "deadline_type", "cycle_year");
+
+
+
+ALTER TABLE ONLY "public"."school_knowledge_chunks"
+    ADD CONSTRAINT "school_knowledge_chunks_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."session_notes"
     ADD CONSTRAINT "session_notes_booking_unique" UNIQUE ("booking_id");
 
@@ -948,6 +1164,21 @@ ALTER TABLE ONLY "public"."session_notes"
 
 ALTER TABLE ONLY "public"."session_notes"
     ADD CONSTRAINT "session_notes_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."strategic_timelines"
+    ADD CONSTRAINT "strategic_timelines_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."strategic_timelines"
+    ADD CONSTRAINT "strategic_timelines_student_unique" UNIQUE ("student_id");
+
+
+
+ALTER TABLE ONLY "public"."student_deadlines"
+    ADD CONSTRAINT "student_deadlines_pkey" PRIMARY KEY ("id");
 
 
 
@@ -988,6 +1219,18 @@ CREATE INDEX "idx_activities_document_id" ON "public"."activities" USING "btree"
 
 
 CREATE INDEX "idx_activities_student_id" ON "public"."activities" USING "btree" ("student_id");
+
+
+
+CREATE INDEX "idx_ai_usage_log_created" ON "public"."ai_usage_log" USING "btree" ("created_at");
+
+
+
+CREATE INDEX "idx_ai_usage_log_function" ON "public"."ai_usage_log" USING "btree" ("function_name");
+
+
+
+CREATE INDEX "idx_ai_usage_log_student" ON "public"."ai_usage_log" USING "btree" ("student_id");
 
 
 
@@ -1071,6 +1314,18 @@ CREATE INDEX "idx_google_calendar_tokens_user" ON "public"."google_calendar_toke
 
 
 
+CREATE INDEX "idx_narrative_annotations_student_id" ON "public"."narrative_annotations" USING "btree" ("student_id");
+
+
+
+CREATE INDEX "idx_narrative_annotations_target" ON "public"."narrative_annotations" USING "btree" ("target_type", "target_key");
+
+
+
+CREATE INDEX "idx_narrative_arcs_student_id" ON "public"."narrative_arcs" USING "btree" ("student_id");
+
+
+
 CREATE INDEX "idx_notifications_booking" ON "public"."notifications_log" USING "btree" ("booking_id");
 
 
@@ -1079,7 +1334,19 @@ CREATE INDEX "idx_scenarios_student_id" ON "public"."scenarios" USING "btree" ("
 
 
 
+CREATE INDEX "idx_school_knowledge_embedding" ON "public"."school_knowledge_chunks" USING "hnsw" ("embedding" "public"."vector_cosine_ops");
+
+
+
 CREATE INDEX "idx_session_notes_booking" ON "public"."session_notes" USING "btree" ("booking_id");
+
+
+
+CREATE INDEX "idx_student_deadlines_due_date" ON "public"."student_deadlines" USING "btree" ("due_date") WHERE ("status" = 'pending'::"text");
+
+
+
+CREATE INDEX "idx_student_deadlines_student" ON "public"."student_deadlines" USING "btree" ("student_id");
 
 
 
@@ -1103,11 +1370,43 @@ CREATE OR REPLACE TRIGGER "bookings_updated_at" BEFORE UPDATE ON "public"."booki
 
 
 
+CREATE OR REPLACE TRIGGER "college_lists_timeline_stale" AFTER INSERT OR DELETE OR UPDATE ON "public"."college_lists" FOR EACH ROW EXECUTE FUNCTION "public"."mark_timeline_stale"();
+
+
+
 CREATE OR REPLACE TRIGGER "profiles_updated_at" BEFORE UPDATE ON "public"."profiles" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
 
 
 
+CREATE OR REPLACE TRIGGER "set_activities_updated_at" BEFORE UPDATE ON "public"."activities" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_awards_updated_at" BEFORE UPDATE ON "public"."awards" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "set_college_lists_updated_at" BEFORE UPDATE ON "public"."college_lists" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_courses_updated_at" BEFORE UPDATE ON "public"."courses" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_school_deadlines_updated_at" BEFORE UPDATE ON "public"."school_deadlines" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_school_knowledge_chunks_updated_at" BEFORE UPDATE ON "public"."school_knowledge_chunks" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_strategic_timelines_updated_at" BEFORE UPDATE ON "public"."strategic_timelines" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_student_deadlines_updated_at" BEFORE UPDATE ON "public"."student_deadlines" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
 
@@ -1123,11 +1422,27 @@ CREATE OR REPLACE TRIGGER "trg_activities_delete_comments" AFTER DELETE ON "publ
 
 
 
+CREATE OR REPLACE TRIGGER "trg_activities_stale_profile" AFTER INSERT OR DELETE ON "public"."activities" FOR EACH ROW EXECUTE FUNCTION "public"."set_profile_stale"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_awards_delete_comments" AFTER DELETE ON "public"."awards" FOR EACH ROW EXECUTE FUNCTION "public"."delete_comments_for_target"('award');
 
 
 
+CREATE OR REPLACE TRIGGER "trg_awards_stale_profile" AFTER INSERT OR DELETE ON "public"."awards" FOR EACH ROW EXECUTE FUNCTION "public"."set_profile_stale"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_courses_delete_comments" AFTER DELETE ON "public"."courses" FOR EACH ROW EXECUTE FUNCTION "public"."delete_comments_for_target"('course');
+
+
+
+CREATE OR REPLACE TRIGGER "trg_courses_stale_profile" AFTER INSERT OR DELETE ON "public"."courses" FOR EACH ROW EXECUTE FUNCTION "public"."set_profile_stale"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_students_stale_profile" BEFORE UPDATE ON "public"."students" FOR EACH ROW EXECUTE FUNCTION "public"."set_profile_stale_on_student_update"();
 
 
 
@@ -1140,6 +1455,14 @@ CREATE OR REPLACE TRIGGER "update_comments_updated_at" BEFORE UPDATE ON "public"
 
 
 CREATE OR REPLACE TRIGGER "update_google_calendar_tokens_updated_at" BEFORE UPDATE ON "public"."google_calendar_tokens" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_narrative_annotations_updated_at" BEFORE UPDATE ON "public"."narrative_annotations" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_narrative_arcs_updated_at" BEFORE UPDATE ON "public"."narrative_arcs" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
 
 
 
@@ -1182,6 +1505,16 @@ ALTER TABLE ONLY "public"."activities"
 
 
 
+ALTER TABLE ONLY "public"."ai_usage_log"
+    ADD CONSTRAINT "ai_usage_log_caller_id_fkey" FOREIGN KEY ("caller_id") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."ai_usage_log"
+    ADD CONSTRAINT "ai_usage_log_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."awards"
     ADD CONSTRAINT "awards_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
 
@@ -1204,11 +1537,6 @@ ALTER TABLE ONLY "public"."bookings"
 
 ALTER TABLE ONLY "public"."bookings"
     ADD CONSTRAINT "bookings_counselor_id_fkey" FOREIGN KEY ("counselor_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."bookings"
-    ADD CONSTRAINT "bookings_proposed_by_fkey" FOREIGN KEY ("proposed_by") REFERENCES "public"."profiles"("id");
 
 
 
@@ -1287,6 +1615,21 @@ ALTER TABLE ONLY "public"."google_calendar_tokens"
 
 
 
+ALTER TABLE ONLY "public"."narrative_annotations"
+    ADD CONSTRAINT "narrative_annotations_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."narrative_annotations"
+    ADD CONSTRAINT "narrative_annotations_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."narrative_arcs"
+    ADD CONSTRAINT "narrative_arcs_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."notifications_log"
     ADD CONSTRAINT "notifications_log_booking_id_fkey" FOREIGN KEY ("booking_id") REFERENCES "public"."bookings"("id") ON DELETE SET NULL;
 
@@ -1294,6 +1637,11 @@ ALTER TABLE ONLY "public"."notifications_log"
 
 ALTER TABLE ONLY "public"."notifications_log"
     ADD CONSTRAINT "notifications_log_recipient_id_fkey" FOREIGN KEY ("recipient_id") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."notifications_log"
+    ADD CONSTRAINT "notifications_log_student_deadline_id_fkey" FOREIGN KEY ("student_deadline_id") REFERENCES "public"."student_deadlines"("id");
 
 
 
@@ -1312,6 +1660,11 @@ ALTER TABLE ONLY "public"."scenarios"
 
 
 
+ALTER TABLE ONLY "public"."school_deadlines"
+    ADD CONSTRAINT "school_deadlines_verified_by_fkey" FOREIGN KEY ("verified_by") REFERENCES "public"."profiles"("id");
+
+
+
 ALTER TABLE ONLY "public"."session_notes"
     ADD CONSTRAINT "session_notes_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "public"."profiles"("id");
 
@@ -1319,6 +1672,26 @@ ALTER TABLE ONLY "public"."session_notes"
 
 ALTER TABLE ONLY "public"."session_notes"
     ADD CONSTRAINT "session_notes_booking_id_fkey" FOREIGN KEY ("booking_id") REFERENCES "public"."bookings"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."strategic_timelines"
+    ADD CONSTRAINT "strategic_timelines_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."student_deadlines"
+    ADD CONSTRAINT "student_deadlines_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "public"."profiles"("id");
+
+
+
+ALTER TABLE ONLY "public"."student_deadlines"
+    ADD CONSTRAINT "student_deadlines_school_deadline_id_fkey" FOREIGN KEY ("school_deadline_id") REFERENCES "public"."school_deadlines"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."student_deadlines"
+    ADD CONSTRAINT "student_deadlines_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
 
 
 
@@ -1396,6 +1769,14 @@ CREATE POLICY "Anyone can view universities" ON "public"."universities" FOR SELE
 
 
 
+CREATE POLICY "Authors can delete own annotations" ON "public"."narrative_annotations" FOR DELETE TO "authenticated" USING (("author_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Authors can update own annotations" ON "public"."narrative_annotations" FOR UPDATE TO "authenticated" USING (("author_id" = "auth"."uid"())) WITH CHECK (("author_id" = "auth"."uid"()));
+
+
+
 CREATE POLICY "Clients can cancel own bookings" ON "public"."bookings" FOR UPDATE USING (("client_id" = "auth"."uid"())) WITH CHECK ((("client_id" = "auth"."uid"()) AND ("status" = 'cancelled_by_client'::"public"."booking_status")));
 
 
@@ -1419,6 +1800,30 @@ CREATE POLICY "Clients can read session notes" ON "public"."session_notes" FOR S
 
 
 CREATE POLICY "Clients can update action item status" ON "public"."action_items" FOR UPDATE USING (("client_id" = "auth"."uid"())) WITH CHECK (("client_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Counselors and admins can insert annotations" ON "public"."narrative_annotations" FOR INSERT TO "authenticated" WITH CHECK (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors and admins can insert narrative arcs" ON "public"."narrative_arcs" FOR INSERT TO "authenticated" WITH CHECK (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors and admins can insert/update timelines" ON "public"."strategic_timelines" USING (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))) WITH CHECK (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
+
+
+
+CREATE POLICY "Counselors and admins can update narrative arcs" ON "public"."narrative_arcs" FOR UPDATE TO "authenticated" USING (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])))) WITH CHECK (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors and admins can view annotations" ON "public"."narrative_annotations" FOR SELECT TO "authenticated" USING (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
+
+
+
+CREATE POLICY "Counselors and admins can view narrative arcs" ON "public"."narrative_arcs" FOR SELECT TO "authenticated" USING (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
 
 
 
@@ -1518,6 +1923,10 @@ CREATE POLICY "Counselors read student availability slots" ON "public"."availabi
 
 
 
+CREATE POLICY "Only admins can delete timelines" ON "public"."strategic_timelines" FOR DELETE USING (("public"."current_user_role"() = 'admin'::"public"."user_role"));
+
+
+
 CREATE POLICY "Parents can create suggestions" ON "public"."college_suggestions" FOR INSERT WITH CHECK (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND ("suggested_by" = "auth"."uid"())));
 
 
@@ -1608,6 +2017,10 @@ CREATE POLICY "Users can read own calendar tokens" ON "public"."google_calendar_
 
 
 
+CREATE POLICY "Users can read own student timelines" ON "public"."strategic_timelines" FOR SELECT USING ("public"."can_access_student"("student_id"));
+
+
+
 CREATE POLICY "Users can update activities for accessible students" ON "public"."activities" FOR UPDATE USING ("public"."can_access_student"("student_id")) WITH CHECK ("public"."can_access_student"("student_id"));
 
 
@@ -1678,6 +2091,15 @@ CREATE POLICY "admins_delete_scenarios" ON "public"."scenarios" FOR DELETE USING
 
 
 
+ALTER TABLE "public"."ai_usage_log" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "ai_usage_log_admin_select" ON "public"."ai_usage_log" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = 'admin'::"public"."user_role")))));
+
+
+
 ALTER TABLE "public"."availability_slots" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1730,6 +2152,12 @@ ALTER TABLE "public"."documents" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."google_calendar_tokens" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."narrative_annotations" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."narrative_arcs" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."notifications_log" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1739,7 +2167,71 @@ ALTER TABLE "public"."profiles" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."scenarios" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."school_deadlines" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "school_deadlines_delete" ON "public"."school_deadlines" FOR DELETE TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = 'admin'::"public"."user_role")))));
+
+
+
+CREATE POLICY "school_deadlines_insert" ON "public"."school_deadlines" FOR INSERT TO "authenticated" WITH CHECK ((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))))));
+
+
+
+CREATE POLICY "school_deadlines_select" ON "public"."school_deadlines" FOR SELECT TO "authenticated" USING (true);
+
+
+
+CREATE POLICY "school_deadlines_update" ON "public"."school_deadlines" FOR UPDATE TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))))));
+
+
+
+ALTER TABLE "public"."school_knowledge_chunks" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "school_knowledge_chunks_delete" ON "public"."school_knowledge_chunks" FOR DELETE TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = 'admin'::"public"."user_role")))));
+
+
+
+CREATE POLICY "school_knowledge_chunks_insert" ON "public"."school_knowledge_chunks" FOR INSERT TO "authenticated" WITH CHECK ((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = 'admin'::"public"."user_role")))));
+
+
+
+CREATE POLICY "school_knowledge_chunks_select" ON "public"."school_knowledge_chunks" FOR SELECT TO "authenticated" USING (true);
+
+
+
+CREATE POLICY "school_knowledge_chunks_update" ON "public"."school_knowledge_chunks" FOR UPDATE TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles"
+  WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = 'admin'::"public"."user_role")))));
+
+
+
 ALTER TABLE "public"."session_notes" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."strategic_timelines" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."student_deadlines" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "student_deadlines_all" ON "public"."student_deadlines" TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."students" "s"
+  WHERE (("s"."id" = "student_deadlines"."student_id") AND (("s"."counselor_id" = "auth"."uid"()) OR ("s"."user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
+           FROM "public"."profiles"
+          WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = 'admin'::"public"."user_role")))))))));
+
 
 
 ALTER TABLE "public"."students" ENABLE ROW LEVEL SECURITY;
@@ -1766,117 +2258,269 @@ GRANT USAGE ON SCHEMA "public" TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec_in"("cstring", "oid", integer) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_in"("cstring", "oid", integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_in"("cstring", "oid", integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_in"("cstring", "oid", integer) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec_out"("public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_out"("public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_out"("public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_out"("public"."halfvec") TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec_recv"("internal", "oid", integer) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_recv"("internal", "oid", integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_recv"("internal", "oid", integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_recv"("internal", "oid", integer) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec_send"("public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_send"("public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_send"("public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_send"("public"."halfvec") TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec_typmod_in"("cstring"[]) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_typmod_in"("cstring"[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_typmod_in"("cstring"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_typmod_in"("cstring"[]) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."sparsevec_in"("cstring", "oid", integer) TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_in"("cstring", "oid", integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_in"("cstring", "oid", integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_in"("cstring", "oid", integer) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."sparsevec_out"("public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_out"("public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_out"("public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_out"("public"."sparsevec") TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."sparsevec_recv"("internal", "oid", integer) TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_recv"("internal", "oid", integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_recv"("internal", "oid", integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_recv"("internal", "oid", integer) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."sparsevec_send"("public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_send"("public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_send"("public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_send"("public"."sparsevec") TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."sparsevec_typmod_in"("cstring"[]) TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_typmod_in"("cstring"[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_typmod_in"("cstring"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_typmod_in"("cstring"[]) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_in"("cstring", "oid", integer) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_in"("cstring", "oid", integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_in"("cstring", "oid", integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_in"("cstring", "oid", integer) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_out"("public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_out"("public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_out"("public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_out"("public"."vector") TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_recv"("internal", "oid", integer) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_recv"("internal", "oid", integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_recv"("internal", "oid", integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_recv"("internal", "oid", integer) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_send"("public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_send"("public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_send"("public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_send"("public"."vector") TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_typmod_in"("cstring"[]) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_typmod_in"("cstring"[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_typmod_in"("cstring"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_typmod_in"("cstring"[]) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(real[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(real[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(real[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(real[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(real[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(real[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(real[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(real[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_vector"(real[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(real[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(real[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(real[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(double precision[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(double precision[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(double precision[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(double precision[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(double precision[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(double precision[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(double precision[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(double precision[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_vector"(double precision[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(double precision[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(double precision[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(double precision[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(integer[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(integer[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(integer[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(integer[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(integer[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(integer[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(integer[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(integer[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_vector"(integer[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(integer[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(integer[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(integer[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(numeric[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(numeric[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(numeric[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_halfvec"(numeric[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(numeric[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(numeric[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(numeric[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_sparsevec"(numeric[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."array_to_vector"(numeric[], integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(numeric[], integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(numeric[], integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."array_to_vector"(numeric[], integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec_to_float4"("public"."halfvec", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_to_float4"("public"."halfvec", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_to_float4"("public"."halfvec", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_to_float4"("public"."halfvec", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec"("public"."halfvec", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec"("public"."halfvec", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec"("public"."halfvec", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec"("public"."halfvec", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec_to_sparsevec"("public"."halfvec", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_to_sparsevec"("public"."halfvec", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_to_sparsevec"("public"."halfvec", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_to_sparsevec"("public"."halfvec", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."halfvec_to_vector"("public"."halfvec", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_to_vector"("public"."halfvec", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_to_vector"("public"."halfvec", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_to_vector"("public"."halfvec", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."sparsevec_to_halfvec"("public"."sparsevec", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_to_halfvec"("public"."sparsevec", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_to_halfvec"("public"."sparsevec", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_to_halfvec"("public"."sparsevec", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."sparsevec"("public"."sparsevec", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec"("public"."sparsevec", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec"("public"."sparsevec", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec"("public"."sparsevec", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."sparsevec_to_vector"("public"."sparsevec", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_to_vector"("public"."sparsevec", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_to_vector"("public"."sparsevec", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_to_vector"("public"."sparsevec", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_to_float4"("public"."vector", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_to_float4"("public"."vector", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_to_float4"("public"."vector", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_to_float4"("public"."vector", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_to_halfvec"("public"."vector", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_to_halfvec"("public"."vector", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_to_halfvec"("public"."vector", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_to_halfvec"("public"."vector", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_to_sparsevec"("public"."vector", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_to_sparsevec"("public"."vector", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_to_sparsevec"("public"."vector", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_to_sparsevec"("public"."vector", integer, boolean) TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector"("public"."vector", integer, boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector"("public"."vector", integer, boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector"("public"."vector", integer, boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector"("public"."vector", integer, boolean) TO "service_role";
 
 
 
@@ -1934,12 +2578,161 @@ GRANT USAGE ON SCHEMA "public" TO "service_role";
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+GRANT ALL ON FUNCTION "public"."binary_quantize"("public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."binary_quantize"("public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."binary_quantize"("public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."binary_quantize"("public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."binary_quantize"("public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."binary_quantize"("public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."binary_quantize"("public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."binary_quantize"("public"."vector") TO "service_role";
 
 
 
 GRANT ALL ON FUNCTION "public"."can_access_student"("p_student_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."can_access_student"("p_student_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."can_access_student"("p_student_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."cosine_distance"("public"."vector", "public"."vector") TO "service_role";
 
 
 
@@ -1955,15 +2748,295 @@ GRANT ALL ON FUNCTION "public"."delete_comments_for_target"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "anon";
-GRANT ALL ON FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."get_overlap_slots"("p_counselor_id" "uuid", "p_student_id" "uuid", "p_start_date" "date", "p_end_date" "date") TO "service_role";
+GRANT ALL ON FUNCTION "public"."halfvec_accum"(double precision[], "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_accum"(double precision[], "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_accum"(double precision[], "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_accum"(double precision[], "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_add"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_add"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_add"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_add"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_avg"(double precision[]) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_avg"(double precision[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_avg"(double precision[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_avg"(double precision[]) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_cmp"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_cmp"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_cmp"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_cmp"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_combine"(double precision[], double precision[]) TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_combine"(double precision[], double precision[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_combine"(double precision[], double precision[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_combine"(double precision[], double precision[]) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_concat"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_concat"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_concat"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_concat"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_eq"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_eq"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_eq"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_eq"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_ge"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_ge"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_ge"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_ge"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_gt"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_gt"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_gt"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_gt"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_l2_squared_distance"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_l2_squared_distance"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_l2_squared_distance"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_l2_squared_distance"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_le"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_le"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_le"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_le"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_lt"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_lt"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_lt"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_lt"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_mul"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_mul"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_mul"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_mul"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_ne"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_ne"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_ne"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_ne"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_negative_inner_product"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_negative_inner_product"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_negative_inner_product"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_negative_inner_product"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_spherical_distance"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_spherical_distance"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_spherical_distance"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_spherical_distance"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."halfvec_sub"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."halfvec_sub"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."halfvec_sub"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."halfvec_sub"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."hamming_distance"(bit, bit) TO "postgres";
+GRANT ALL ON FUNCTION "public"."hamming_distance"(bit, bit) TO "anon";
+GRANT ALL ON FUNCTION "public"."hamming_distance"(bit, bit) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."hamming_distance"(bit, bit) TO "service_role";
 
 
 
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "anon";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."hnsw_bit_support"("internal") TO "postgres";
+GRANT ALL ON FUNCTION "public"."hnsw_bit_support"("internal") TO "anon";
+GRANT ALL ON FUNCTION "public"."hnsw_bit_support"("internal") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."hnsw_bit_support"("internal") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."hnsw_halfvec_support"("internal") TO "postgres";
+GRANT ALL ON FUNCTION "public"."hnsw_halfvec_support"("internal") TO "anon";
+GRANT ALL ON FUNCTION "public"."hnsw_halfvec_support"("internal") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."hnsw_halfvec_support"("internal") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."hnsw_sparsevec_support"("internal") TO "postgres";
+GRANT ALL ON FUNCTION "public"."hnsw_sparsevec_support"("internal") TO "anon";
+GRANT ALL ON FUNCTION "public"."hnsw_sparsevec_support"("internal") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."hnsw_sparsevec_support"("internal") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."hnswhandler"("internal") TO "postgres";
+GRANT ALL ON FUNCTION "public"."hnswhandler"("internal") TO "anon";
+GRANT ALL ON FUNCTION "public"."hnswhandler"("internal") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."hnswhandler"("internal") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."inner_product"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."ivfflat_bit_support"("internal") TO "postgres";
+GRANT ALL ON FUNCTION "public"."ivfflat_bit_support"("internal") TO "anon";
+GRANT ALL ON FUNCTION "public"."ivfflat_bit_support"("internal") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."ivfflat_bit_support"("internal") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."ivfflat_halfvec_support"("internal") TO "postgres";
+GRANT ALL ON FUNCTION "public"."ivfflat_halfvec_support"("internal") TO "anon";
+GRANT ALL ON FUNCTION "public"."ivfflat_halfvec_support"("internal") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."ivfflat_halfvec_support"("internal") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."ivfflathandler"("internal") TO "postgres";
+GRANT ALL ON FUNCTION "public"."ivfflathandler"("internal") TO "anon";
+GRANT ALL ON FUNCTION "public"."ivfflathandler"("internal") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."ivfflathandler"("internal") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."jaccard_distance"(bit, bit) TO "postgres";
+GRANT ALL ON FUNCTION "public"."jaccard_distance"(bit, bit) TO "anon";
+GRANT ALL ON FUNCTION "public"."jaccard_distance"(bit, bit) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."jaccard_distance"(bit, bit) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l1_distance"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."halfvec", "public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."halfvec", "public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."halfvec", "public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."halfvec", "public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l2_distance"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l2_norm"("public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l2_norm"("public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."l2_norm"("public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l2_norm"("public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l2_norm"("public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l2_norm"("public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."l2_norm"("public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l2_norm"("public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."l2_normalize"("public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."mark_timeline_stale"() TO "anon";
+GRANT ALL ON FUNCTION "public"."mark_timeline_stale"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."mark_timeline_stale"() TO "service_role";
 
 
 
@@ -1975,18 +3048,281 @@ GRANT ALL ON FUNCTION "public"."send_auth_email"("event" "jsonb") TO "supabase_a
 
 
 
+GRANT ALL ON FUNCTION "public"."set_profile_stale"() TO "anon";
+GRANT ALL ON FUNCTION "public"."set_profile_stale"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_profile_stale"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."set_profile_stale_on_student_update"() TO "anon";
+GRANT ALL ON FUNCTION "public"."set_profile_stale_on_student_update"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_profile_stale_on_student_update"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "anon";
+GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_updated_at"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_cmp"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_cmp"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_cmp"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_cmp"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_eq"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_eq"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_eq"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_eq"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_ge"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_ge"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_ge"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_ge"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_gt"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_gt"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_gt"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_gt"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_l2_squared_distance"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_l2_squared_distance"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_l2_squared_distance"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_l2_squared_distance"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_le"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_le"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_le"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_le"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_lt"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_lt"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_lt"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_lt"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_ne"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_ne"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_ne"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_ne"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sparsevec_negative_inner_product"("public"."sparsevec", "public"."sparsevec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sparsevec_negative_inner_product"("public"."sparsevec", "public"."sparsevec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sparsevec_negative_inner_product"("public"."sparsevec", "public"."sparsevec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sparsevec_negative_inner_product"("public"."sparsevec", "public"."sparsevec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."subvector"("public"."halfvec", integer, integer) TO "postgres";
+GRANT ALL ON FUNCTION "public"."subvector"("public"."halfvec", integer, integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."subvector"("public"."halfvec", integer, integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."subvector"("public"."halfvec", integer, integer) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."subvector"("public"."vector", integer, integer) TO "postgres";
+GRANT ALL ON FUNCTION "public"."subvector"("public"."vector", integer, integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."subvector"("public"."vector", integer, integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."subvector"("public"."vector", integer, integer) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."update_updated_at"() TO "anon";
 GRANT ALL ON FUNCTION "public"."update_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."update_updated_at"() TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."vector_accum"(double precision[], "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_accum"(double precision[], "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_accum"(double precision[], "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_accum"(double precision[], "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_add"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_add"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_add"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_add"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_avg"(double precision[]) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_avg"(double precision[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_avg"(double precision[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_avg"(double precision[]) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_cmp"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_cmp"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_cmp"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_cmp"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_combine"(double precision[], double precision[]) TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_combine"(double precision[], double precision[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_combine"(double precision[], double precision[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_combine"(double precision[], double precision[]) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_concat"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_concat"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_concat"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_concat"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_dims"("public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_dims"("public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_dims"("public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_dims"("public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_dims"("public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_dims"("public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_dims"("public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_dims"("public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_eq"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_eq"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_eq"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_eq"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_ge"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_ge"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_ge"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_ge"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_gt"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_gt"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_gt"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_gt"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_l2_squared_distance"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_l2_squared_distance"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_l2_squared_distance"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_l2_squared_distance"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_le"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_le"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_le"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_le"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_lt"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_lt"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_lt"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_lt"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_mul"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_mul"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_mul"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_mul"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_ne"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_ne"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_ne"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_ne"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_negative_inner_product"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_negative_inner_product"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_negative_inner_product"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_negative_inner_product"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_norm"("public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_norm"("public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_norm"("public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_norm"("public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_spherical_distance"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_spherical_distance"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_spherical_distance"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_spherical_distance"("public"."vector", "public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vector_sub"("public"."vector", "public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."vector_sub"("public"."vector", "public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."vector_sub"("public"."vector", "public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vector_sub"("public"."vector", "public"."vector") TO "service_role";
 
 
 
 
 
 
+
+
+
+
+
+
+GRANT ALL ON FUNCTION "public"."avg"("public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."avg"("public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."avg"("public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."avg"("public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."avg"("public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."avg"("public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."avg"("public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."avg"("public"."vector") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sum"("public"."halfvec") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sum"("public"."halfvec") TO "anon";
+GRANT ALL ON FUNCTION "public"."sum"("public"."halfvec") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sum"("public"."halfvec") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sum"("public"."vector") TO "postgres";
+GRANT ALL ON FUNCTION "public"."sum"("public"."vector") TO "anon";
+GRANT ALL ON FUNCTION "public"."sum"("public"."vector") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sum"("public"."vector") TO "service_role";
 
 
 
@@ -2011,6 +3347,12 @@ GRANT ALL ON TABLE "public"."action_items" TO "service_role";
 GRANT ALL ON TABLE "public"."activities" TO "anon";
 GRANT ALL ON TABLE "public"."activities" TO "authenticated";
 GRANT ALL ON TABLE "public"."activities" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."ai_usage_log" TO "anon";
+GRANT ALL ON TABLE "public"."ai_usage_log" TO "authenticated";
+GRANT ALL ON TABLE "public"."ai_usage_log" TO "service_role";
 
 
 
@@ -2086,6 +3428,18 @@ GRANT ALL ON TABLE "public"."google_calendar_tokens" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."narrative_annotations" TO "anon";
+GRANT ALL ON TABLE "public"."narrative_annotations" TO "authenticated";
+GRANT ALL ON TABLE "public"."narrative_annotations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."narrative_arcs" TO "anon";
+GRANT ALL ON TABLE "public"."narrative_arcs" TO "authenticated";
+GRANT ALL ON TABLE "public"."narrative_arcs" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."notifications_log" TO "anon";
 GRANT ALL ON TABLE "public"."notifications_log" TO "authenticated";
 GRANT ALL ON TABLE "public"."notifications_log" TO "service_role";
@@ -2104,9 +3458,33 @@ GRANT ALL ON TABLE "public"."scenarios" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."school_deadlines" TO "anon";
+GRANT ALL ON TABLE "public"."school_deadlines" TO "authenticated";
+GRANT ALL ON TABLE "public"."school_deadlines" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."school_knowledge_chunks" TO "anon";
+GRANT ALL ON TABLE "public"."school_knowledge_chunks" TO "authenticated";
+GRANT ALL ON TABLE "public"."school_knowledge_chunks" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."session_notes" TO "anon";
 GRANT ALL ON TABLE "public"."session_notes" TO "authenticated";
 GRANT ALL ON TABLE "public"."session_notes" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."strategic_timelines" TO "anon";
+GRANT ALL ON TABLE "public"."strategic_timelines" TO "authenticated";
+GRANT ALL ON TABLE "public"."strategic_timelines" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."student_deadlines" TO "anon";
+GRANT ALL ON TABLE "public"."student_deadlines" TO "authenticated";
+GRANT ALL ON TABLE "public"."student_deadlines" TO "service_role";
 
 
 
