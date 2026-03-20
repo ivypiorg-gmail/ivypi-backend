@@ -767,7 +767,7 @@ Deno.serve(
             .from("committee_simulations")
             .update({
               status: "failed",
-              error_phase: "member_assessment",
+              error_phase: "member_calls",
               assessments: successfulAssessments,
               panel_composition: panelComposition,
             })
@@ -840,7 +840,7 @@ You must respond with a JSON object in this exact format:
             })
             .eq("id", simulationId);
 
-          return { simulation_id: simulationId };
+          return { simulation_id: simulationId, status: "partial", error_phase: "synthesis" };
         }
 
         // ── Step 10: Phase 4 — Essay prompt analysis (conditional) ──
@@ -866,7 +866,7 @@ You must respond with a JSON object in this exact format:
   "avoid": ["<what to avoid>", ...]
 }]`;
 
-          const essayAnalysisContext = `COMMITTEE ASSESSMENTS:\n${formatAssessmentsForSynthesis(successfulAssessments)}\n\nSYNTHESIS VERDICT:\n${synthResult.verdict}\n\nESSAY PROMPTS:\n${essayPrompts.map((p: string, i: number) => `${i + 1}. ${p}`).join("\n")}`;
+          const essayAnalysisContext = `COMMITTEE ASSESSMENTS:\n${formatAssessmentsForSynthesis(successfulAssessments)}\n\nSYNTHESIS VERDICT:\n${synthResult.verdict}\n\nESSAY PROMPTS:\n${essayPrompts.map((p: { prompt: string; word_limit: number | null; what_it_tests: string }, i: number) => `${i + 1}. ${p.prompt}\n   Word limit: ${p.word_limit || "Not specified"}\n   What it tests: ${p.what_it_tests}`).join("\n")}`;
 
           try {
             const essayResponse = await callClaude(
@@ -902,7 +902,7 @@ You must respond with a JSON object in this exact format:
               })
               .eq("id", simulationId);
 
-            return { simulation_id: simulationId };
+            return { simulation_id: simulationId, status: "partial", error_phase: "essay_analysis" };
           }
         }
 
