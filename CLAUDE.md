@@ -40,6 +40,31 @@ Located in `supabase/functions/`. Deployed via `supabase functions deploy <name>
 - **Scheduling:** `generate-recurring-sessions`
 - **Shared:** `_shared/ai-helpers.ts`, `_shared/email-templates.ts`
 
+## Edge Function Environment Variables
+
+Set via Supabase Dashboard (Settings > Edge Functions > Environment Variables):
+
+```
+# Auto-provided by Supabase
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+
+# AI
+ANTHROPIC_API_KEY=
+
+# Email
+RESEND_API_KEY=
+
+# SMS
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_PHONE_NUMBER=
+
+# Campus Oracle — Google Custom Search
+GOOGLE_CSE_API_KEY=           # From console.cloud.google.com/apis/credentials
+GOOGLE_CSE_CX=                # Search Engine ID from programmablesearchengine.google.com
+```
+
 ## Regenerating Schema Artifacts
 
 After any schema change (migration or SQL editor):
