@@ -129,7 +129,9 @@ RULES:
 - Identity frames must be school-type-aware
 - Reference ONLY the exact IDs provided in the data
 - Generate stable, descriptive keys (lowercase, underscored)
-- Aim for 3-5 throughlines, 1-3 contradictions, 1-3 gaps, 2-3 identity frames`;
+- Aim for 3-5 throughlines, 1-3 contradictions, 1-3 gaps, 2-3 identity frames
+- Each throughline should have evidence from MULTIPLE source types (courses + activities, activities + awards, etc.) — diverse evidence makes throughlines more compelling
+- A throughline supported only by courses or only by activities is weaker than one crossing domains`;
 
 const STAGE_INSTRUCTIONS: Record<NarrativeStage, string> = {
   academic:
@@ -161,8 +163,8 @@ function buildDataSources(
   testScores: Record<string, unknown>,
 ): string[] {
   const sources: string[] = [];
-  if (courses.length > 0) sources.push("courses");
-  if (activities.length > 0) sources.push("activities");
+  if (courses.length > 0) sources.push("transcript");
+  if (activities.length > 0) sources.push("resume");
   if (awards.length > 0) sources.push("awards");
   if (surveyCompletedAt) sources.push("survey");
   if (testScores && Object.keys(testScores).length > 0)
