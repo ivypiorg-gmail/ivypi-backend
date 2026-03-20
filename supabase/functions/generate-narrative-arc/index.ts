@@ -480,6 +480,17 @@ GPA (Weighted): ${student.gpa_weighted ?? "N/A"}`;
           );
         }
 
+        // Fire-and-forget: generate scenario suggestions from the new arc
+        const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+        fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/suggest-scenarios`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${serviceKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ student_id: student_id }),
+        }).catch(() => {}); // Silent failure — suggestions are non-critical
+
         return {
           message: "Narrative arc generated successfully",
           stage,
