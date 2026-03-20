@@ -309,6 +309,21 @@ $$;
 ALTER FUNCTION "public"."delete_comments_for_target"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."derive_application_cycle"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  IF NEW.application_cycle IS NULL AND NEW.grad_year IS NOT NULL THEN
+    NEW.application_cycle := NEW.grad_year;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."derive_application_cycle"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -680,7 +695,8 @@ CREATE TABLE IF NOT EXISTS "public"."college_lists" (
     "app_status" "public"."app_status" DEFAULT 'considering'::"public"."app_status" NOT NULL,
     "decision_date" "date",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "added_by" "uuid"
 );
 
 
@@ -700,7 +716,7 @@ CREATE TABLE IF NOT EXISTS "public"."college_suggestions" (
     "resolved_at" timestamp with time zone,
     "resolved_by" "uuid",
     CONSTRAINT "college_suggestions_status_check" CHECK (("status" = ANY (ARRAY['pending'::"text", 'approved'::"text", 'dismissed'::"text"]))),
-    CONSTRAINT "college_suggestions_suggestion_type_check" CHECK (("suggestion_type" = ANY (ARRAY['add_school'::"text", 'update_status'::"text"])))
+    CONSTRAINT "college_suggestions_suggestion_type_check" CHECK (("suggestion_type" = ANY (ARRAY['add_school'::"text", 'update_status'::"text", 'remove_school'::"text"])))
 );
 
 
@@ -979,7 +995,8 @@ CREATE TABLE IF NOT EXISTS "public"."students" (
     "profile_stale" boolean DEFAULT false NOT NULL,
     "narrative_arc" "jsonb",
     "narrative_arc_generated_at" timestamp with time zone,
-    "narrative_arc_shared_keys" "text"[] DEFAULT '{}'::"text"[] NOT NULL
+    "narrative_arc_shared_keys" "text"[] DEFAULT '{}'::"text"[] NOT NULL,
+    "application_cycle" integer
 );
 
 
@@ -1418,6 +1435,10 @@ CREATE OR REPLACE TRIGGER "set_universities_updated_at" BEFORE UPDATE ON "public
 
 
 
+CREATE OR REPLACE TRIGGER "students_derive_application_cycle" BEFORE INSERT OR UPDATE ON "public"."students" FOR EACH ROW EXECUTE FUNCTION "public"."derive_application_cycle"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_activities_delete_comments" AFTER DELETE ON "public"."activities" FOR EACH ROW EXECUTE FUNCTION "public"."delete_comments_for_target"('activity');
 
 
@@ -1547,6 +1568,11 @@ ALTER TABLE ONLY "public"."college_data_corrections"
 
 ALTER TABLE ONLY "public"."college_data_corrections"
     ADD CONSTRAINT "college_data_corrections_submitted_by_fkey" FOREIGN KEY ("submitted_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "public"."college_lists"
+    ADD CONSTRAINT "college_lists_added_by_fkey" FOREIGN KEY ("added_by") REFERENCES "public"."profiles"("id");
 
 
 
@@ -1927,7 +1953,7 @@ CREATE POLICY "Only admins can delete timelines" ON "public"."strategic_timeline
 
 
 
-CREATE POLICY "Parents can create suggestions" ON "public"."college_suggestions" FOR INSERT WITH CHECK (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND ("suggested_by" = "auth"."uid"())));
+CREATE POLICY "Parents can add schools to own student lists" ON "public"."college_lists" FOR INSERT WITH CHECK ((("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND "public"."can_access_student"("student_id")));
 
 
 
@@ -1940,10 +1966,6 @@ CREATE POLICY "Parents can read booking students" ON "public"."booking_students"
 
 
 CREATE POLICY "Parents can update unassigned students" ON "public"."students" FOR UPDATE USING ((("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND ("user_id" = "auth"."uid"()) AND ("counselor_id" IS NULL) AND ("status" = 'pending_approval'::"public"."student_status"))) WITH CHECK ((("public"."current_user_role"() = 'student_parent'::"public"."user_role") AND ("user_id" = "auth"."uid"()) AND ("status" = 'pending_approval'::"public"."student_status")));
-
-
-
-CREATE POLICY "Parents can view own suggestions" ON "public"."college_suggestions" FOR SELECT USING (("suggested_by" = "auth"."uid"()));
 
 
 
@@ -1966,6 +1988,10 @@ CREATE POLICY "Public can verify pending invite" ON "public"."counselor_invites"
 
 
 CREATE POLICY "Users can add comments for accessible students" ON "public"."comments" FOR INSERT WITH CHECK (("public"."can_access_student"("student_id") AND ("author_id" = "auth"."uid"())));
+
+
+
+CREATE POLICY "Users can create suggestions" ON "public"."college_suggestions" FOR INSERT WITH CHECK (("public"."can_access_student"("student_id") AND ("suggested_by" = "auth"."uid"())));
 
 
 
@@ -2076,6 +2102,10 @@ CREATE POLICY "Users can view own documents" ON "public"."documents" FOR SELECT 
 
 
 CREATE POLICY "Users can view own student record" ON "public"."students" FOR SELECT USING ("public"."can_access_student"("id"));
+
+
+
+CREATE POLICY "Users can view relevant suggestions" ON "public"."college_suggestions" FOR SELECT USING ((("suggested_by" = "auth"."uid"()) OR "public"."can_access_student"("student_id")));
 
 
 
@@ -2745,6 +2775,12 @@ GRANT ALL ON FUNCTION "public"."current_user_role"() TO "service_role";
 GRANT ALL ON FUNCTION "public"."delete_comments_for_target"() TO "anon";
 GRANT ALL ON FUNCTION "public"."delete_comments_for_target"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."delete_comments_for_target"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."derive_application_cycle"() TO "anon";
+GRANT ALL ON FUNCTION "public"."derive_application_cycle"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."derive_application_cycle"() TO "service_role";
 
 
 
