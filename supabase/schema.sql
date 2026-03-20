@@ -253,6 +253,18 @@ CREATE TYPE "public"."user_role" AS ENUM (
 ALTER TYPE "public"."user_role" OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."append_oracle_messages"("conv_id" "uuid", "new_messages" "jsonb") RETURNS "void"
+    LANGUAGE "sql" SECURITY DEFINER
+    AS $$
+  UPDATE campus_oracle_conversations
+  SET messages = messages || new_messages, updated_at = now()
+  WHERE id = conv_id;
+$$;
+
+
+ALTER FUNCTION "public"."append_oracle_messages"("conv_id" "uuid", "new_messages" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."can_access_student"("p_student_id" "uuid") RETURNS boolean
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -670,6 +682,19 @@ CREATE TABLE IF NOT EXISTS "public"."bookings" (
 ALTER TABLE "public"."bookings" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."campus_oracle_conversations" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "student_id" "uuid" NOT NULL,
+    "school_name" "text" NOT NULL,
+    "messages" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."campus_oracle_conversations" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."college_data_corrections" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "school_name" "text" NOT NULL,
@@ -920,6 +945,21 @@ CREATE TABLE IF NOT EXISTS "public"."school_knowledge_chunks" (
 ALTER TABLE "public"."school_knowledge_chunks" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."school_url_index" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "school_name" "text" NOT NULL,
+    "page_type" "text" NOT NULL,
+    "url" "text" NOT NULL,
+    "label" "text" NOT NULL,
+    "last_verified_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."school_url_index" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."session_notes" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "booking_id" "uuid" NOT NULL,
@@ -1074,6 +1114,16 @@ ALTER TABLE ONLY "public"."bookings"
 
 
 
+ALTER TABLE ONLY "public"."campus_oracle_conversations"
+    ADD CONSTRAINT "campus_oracle_conversations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."campus_oracle_conversations"
+    ADD CONSTRAINT "campus_oracle_conversations_unique" UNIQUE ("student_id", "school_name");
+
+
+
 ALTER TABLE ONLY "public"."college_data_corrections"
     ADD CONSTRAINT "college_data_corrections_pkey" PRIMARY KEY ("id");
 
@@ -1171,6 +1221,16 @@ ALTER TABLE ONLY "public"."school_deadlines"
 
 ALTER TABLE ONLY "public"."school_knowledge_chunks"
     ADD CONSTRAINT "school_knowledge_chunks_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."school_url_index"
+    ADD CONSTRAINT "school_url_index_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."school_url_index"
+    ADD CONSTRAINT "school_url_index_unique" UNIQUE ("school_name", "page_type");
 
 
 
@@ -1279,6 +1339,10 @@ CREATE INDEX "idx_bookings_recurrence_group" ON "public"."bookings" USING "btree
 
 
 
+CREATE INDEX "idx_campus_oracle_student" ON "public"."campus_oracle_conversations" USING "btree" ("student_id");
+
+
+
 CREATE INDEX "idx_college_lists_student_id" ON "public"."college_lists" USING "btree" ("student_id");
 
 
@@ -1355,6 +1419,10 @@ CREATE INDEX "idx_school_knowledge_embedding" ON "public"."school_knowledge_chun
 
 
 
+CREATE INDEX "idx_school_url_index_school" ON "public"."school_url_index" USING "btree" ("school_name");
+
+
+
 CREATE INDEX "idx_session_notes_booking" ON "public"."session_notes" USING "btree" ("booking_id");
 
 
@@ -1403,6 +1471,10 @@ CREATE OR REPLACE TRIGGER "set_awards_updated_at" BEFORE UPDATE ON "public"."awa
 
 
 
+CREATE OR REPLACE TRIGGER "set_campus_oracle_conversations_updated_at" BEFORE UPDATE ON "public"."campus_oracle_conversations" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "set_college_lists_updated_at" BEFORE UPDATE ON "public"."college_lists" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
 
 
@@ -1416,6 +1488,10 @@ CREATE OR REPLACE TRIGGER "set_school_deadlines_updated_at" BEFORE UPDATE ON "pu
 
 
 CREATE OR REPLACE TRIGGER "set_school_knowledge_chunks_updated_at" BEFORE UPDATE ON "public"."school_knowledge_chunks" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_school_url_index_updated_at" BEFORE UPDATE ON "public"."school_url_index" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_at"();
 
 
 
@@ -1558,6 +1634,11 @@ ALTER TABLE ONLY "public"."bookings"
 
 ALTER TABLE ONLY "public"."bookings"
     ADD CONSTRAINT "bookings_counselor_id_fkey" FOREIGN KEY ("counselor_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."campus_oracle_conversations"
+    ADD CONSTRAINT "campus_oracle_conversations_student_id_fkey" FOREIGN KEY ("student_id") REFERENCES "public"."students"("id") ON DELETE CASCADE;
 
 
 
@@ -1795,6 +1876,10 @@ CREATE POLICY "Anyone can view universities" ON "public"."universities" FOR SELE
 
 
 
+CREATE POLICY "Authenticated users can read URL index" ON "public"."school_url_index" FOR SELECT TO "authenticated" USING (true);
+
+
+
 CREATE POLICY "Authors can delete own annotations" ON "public"."narrative_annotations" FOR DELETE TO "authenticated" USING (("author_id" = "auth"."uid"()));
 
 
@@ -1829,6 +1914,14 @@ CREATE POLICY "Clients can update action item status" ON "public"."action_items"
 
 
 
+CREATE POLICY "Counselors and admins can delete URL index" ON "public"."school_url_index" FOR DELETE TO "authenticated" USING (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
+
+
+
+CREATE POLICY "Counselors and admins can delete conversations" ON "public"."campus_oracle_conversations" FOR DELETE USING (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
+
+
+
 CREATE POLICY "Counselors and admins can insert annotations" ON "public"."narrative_annotations" FOR INSERT TO "authenticated" WITH CHECK (("public"."can_access_student"("student_id") AND ("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))));
 
 
@@ -1838,6 +1931,18 @@ CREATE POLICY "Counselors and admins can insert narrative arcs" ON "public"."nar
 
 
 CREATE POLICY "Counselors and admins can insert/update timelines" ON "public"."strategic_timelines" USING (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"]))) WITH CHECK (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
+
+
+
+CREATE POLICY "Counselors and admins can manage URL index" ON "public"."school_url_index" FOR INSERT TO "authenticated" WITH CHECK (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
+
+
+
+CREATE POLICY "Counselors and admins can update URL index" ON "public"."school_url_index" FOR UPDATE TO "authenticated" USING (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
+
+
+
+CREATE POLICY "Counselors and admins can update conversations" ON "public"."campus_oracle_conversations" FOR UPDATE USING (("public"."current_user_role"() = ANY (ARRAY['counselor'::"public"."user_role", 'admin'::"public"."user_role"])));
 
 
 
@@ -1991,6 +2096,10 @@ CREATE POLICY "Users can add comments for accessible students" ON "public"."comm
 
 
 
+CREATE POLICY "Users can create conversations for accessible students" ON "public"."campus_oracle_conversations" FOR INSERT WITH CHECK ("public"."can_access_student"("student_id"));
+
+
+
 CREATE POLICY "Users can create suggestions" ON "public"."college_suggestions" FOR INSERT WITH CHECK (("public"."can_access_student"("student_id") AND ("suggested_by" = "auth"."uid"())));
 
 
@@ -2040,6 +2149,10 @@ CREATE POLICY "Users can insert own calendar tokens" ON "public"."google_calenda
 
 
 CREATE POLICY "Users can read own calendar tokens" ON "public"."google_calendar_tokens" FOR SELECT USING (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Users can read own student conversations" ON "public"."campus_oracle_conversations" FOR SELECT USING ("public"."can_access_student"("student_id"));
 
 
 
@@ -2140,6 +2253,9 @@ ALTER TABLE "public"."booking_students" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."bookings" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."campus_oracle_conversations" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."college_data_corrections" ENABLE ROW LEVEL SECURITY;
@@ -2245,6 +2361,9 @@ CREATE POLICY "school_knowledge_chunks_update" ON "public"."school_knowledge_chu
    FROM "public"."profiles"
   WHERE (("profiles"."id" = "auth"."uid"()) AND ("profiles"."role" = 'admin'::"public"."user_role")))));
 
+
+
+ALTER TABLE "public"."school_url_index" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."session_notes" ENABLE ROW LEVEL SECURITY;
@@ -2722,6 +2841,12 @@ GRANT ALL ON FUNCTION "public"."vector"("public"."vector", integer, boolean) TO 
 
 
 
+
+
+
+GRANT ALL ON FUNCTION "public"."append_oracle_messages"("conv_id" "uuid", "new_messages" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."append_oracle_messages"("conv_id" "uuid", "new_messages" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."append_oracle_messages"("conv_id" "uuid", "new_messages" "jsonb") TO "service_role";
 
 
 
@@ -3416,6 +3541,12 @@ GRANT ALL ON TABLE "public"."bookings" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."campus_oracle_conversations" TO "anon";
+GRANT ALL ON TABLE "public"."campus_oracle_conversations" TO "authenticated";
+GRANT ALL ON TABLE "public"."campus_oracle_conversations" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."college_data_corrections" TO "anon";
 GRANT ALL ON TABLE "public"."college_data_corrections" TO "authenticated";
 GRANT ALL ON TABLE "public"."college_data_corrections" TO "service_role";
@@ -3503,6 +3634,12 @@ GRANT ALL ON TABLE "public"."school_deadlines" TO "service_role";
 GRANT ALL ON TABLE "public"."school_knowledge_chunks" TO "anon";
 GRANT ALL ON TABLE "public"."school_knowledge_chunks" TO "authenticated";
 GRANT ALL ON TABLE "public"."school_knowledge_chunks" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."school_url_index" TO "anon";
+GRANT ALL ON TABLE "public"."school_url_index" TO "authenticated";
+GRANT ALL ON TABLE "public"."school_url_index" TO "service_role";
 
 
 
