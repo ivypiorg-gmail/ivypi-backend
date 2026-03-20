@@ -1,12 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { cancellationNotice } from "../_shared/email-templates.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+import { corsHeaders } from "../_shared/edge-middleware.ts";
+import { sendResendEmail } from "../_shared/send-email.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -32,7 +27,6 @@ Deno.serve(async (req: Request) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const resendApiKey = Deno.env.get("RESEND_API_KEY")!;
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
@@ -91,24 +85,11 @@ Deno.serve(async (req: Request) => {
     });
 
     // Send cancellation notice to the other party
-    const emailResponse = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${resendApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: "IvyPi Scheduling <noreply@ivypi.org>",
-        to: [recipient.email],
-        subject: "Session Cancelled - IvyPi",
-        html: cancellationNotice(recipient.full_name, cancellerName, formattedDate, formattedTime),
-      }),
+    await sendResendEmail({
+      to: [recipient.email],
+      subject: "Session Cancelled - IvyPi",
+      html: cancellationNotice(recipient.full_name, cancellerName, formattedDate, formattedTime),
     });
-
-    if (!emailResponse.ok) {
-      const err = await emailResponse.text();
-      throw new Error(`Failed to send cancellation email: ${err}`);
-    }
 
     // Log to notifications_log
     const { error: logError } = await supabase

@@ -1,12 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { reminderClient, reminderCounselor } from "../_shared/email-templates.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+import { corsHeaders } from "../_shared/edge-middleware.ts";
+import { sendResendEmail } from "../_shared/send-email.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -16,7 +11,6 @@ Deno.serve(async (req: Request) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const resendApiKey = Deno.env.get("RESEND_API_KEY")!;
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
@@ -90,42 +84,26 @@ Deno.serve(async (req: Request) => {
       });
 
       // Send reminder to client
-      const clientEmailRes = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendApiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          from: "IvyPi Scheduling <noreply@ivypi.org>",
+      try {
+        await sendResendEmail({
           to: [client.email],
           subject: "Reminder: Upcoming Session Tomorrow - IvyPi",
           html: reminderClient(client.full_name, counselor.full_name, formattedDate, formattedTime),
-        }),
-      });
-
-      if (!clientEmailRes.ok) {
-        console.error(`Failed to send client reminder for booking ${booking.id}:`, await clientEmailRes.text());
+        });
+      } catch (e) {
+        console.error(`Failed to send client reminder for booking ${booking.id}:`, (e as Error).message);
         continue;
       }
 
       // Send reminder to counselor
-      const counselorEmailRes = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendApiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          from: "IvyPi Scheduling <noreply@ivypi.org>",
+      try {
+        await sendResendEmail({
           to: [counselor.email],
           subject: "Reminder: Upcoming Session Tomorrow - IvyPi",
           html: reminderCounselor(counselor.full_name, client.full_name, formattedDate, formattedTime),
-        }),
-      });
-
-      if (!counselorEmailRes.ok) {
-        console.error(`Failed to send counselor reminder for booking ${booking.id}:`, await counselorEmailRes.text());
+        });
+      } catch (e) {
+        console.error(`Failed to send counselor reminder for booking ${booking.id}:`, (e as Error).message);
         continue;
       }
 

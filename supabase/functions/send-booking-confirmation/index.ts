@@ -3,13 +3,8 @@ import {
   bookingConfirmationClient,
   bookingConfirmationCounselor,
 } from "../_shared/email-templates.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+import { corsHeaders } from "../_shared/edge-middleware.ts";
+import { sendResendEmail } from "../_shared/send-email.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -28,7 +23,6 @@ Deno.serve(async (req: Request) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const resendApiKey = Deno.env.get("RESEND_API_KEY")!;
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
@@ -82,45 +76,18 @@ Deno.serve(async (req: Request) => {
       hour12: true,
     });
 
-    // Send confirmation email to client
-    const clientEmailResponse = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${resendApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: "IvyPi Scheduling <noreply@ivypi.org>",
-        to: [client.email],
-        subject: "Booking Confirmation - IvyPi",
-        html: bookingConfirmationClient(client.full_name, counselor.full_name, formattedDate, formattedTime, booking.starts_at, booking.ends_at),
-      }),
+    // Send confirmation emails
+    await sendResendEmail({
+      to: [client.email],
+      subject: "Booking Confirmation - IvyPi",
+      html: bookingConfirmationClient(client.full_name, counselor.full_name, formattedDate, formattedTime, booking.starts_at, booking.ends_at),
     });
 
-    if (!clientEmailResponse.ok) {
-      const err = await clientEmailResponse.text();
-      throw new Error(`Failed to send client email: ${err}`);
-    }
-
-    // Send confirmation email to counselor
-    const counselorEmailResponse = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${resendApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: "IvyPi Scheduling <noreply@ivypi.org>",
-        to: [counselor.email],
-        subject: "New Booking Confirmation - IvyPi",
-        html: bookingConfirmationCounselor(counselor.full_name, client.full_name, formattedDate, formattedTime),
-      }),
+    await sendResendEmail({
+      to: [counselor.email],
+      subject: "New Booking Confirmation - IvyPi",
+      html: bookingConfirmationCounselor(counselor.full_name, client.full_name, formattedDate, formattedTime),
     });
-
-    if (!counselorEmailResponse.ok) {
-      const err = await counselorEmailResponse.text();
-      throw new Error(`Failed to send counselor email: ${err}`);
-    }
 
     // Log to notifications_log
     const logEntries = [

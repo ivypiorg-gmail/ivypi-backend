@@ -1,11 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { deadlineReminder7d, deadlineReminder2d } from "../_shared/email-templates.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+import { corsHeaders } from "../_shared/edge-middleware.ts";
+import { sendResendEmail } from "../_shared/send-email.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -15,7 +11,6 @@ Deno.serve(async (req: Request) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const resendApiKey = Deno.env.get("RESEND_API_KEY")!;
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
@@ -108,19 +103,12 @@ Deno.serve(async (req: Request) => {
           ? `Upcoming deadline: ${deadline.school_name} — due ${dueDate}`
           : `Due in 2 days: ${deadline.school_name} ${deadline.deadline_type?.replace(/_/g, " ") ?? "deadline"}`;
 
-        await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${resendApiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            from: "IvyPi Deadlines <noreply@ivypi.org>",
-            to,
-            cc,
-            subject,
-            html,
-          }),
+        await sendResendEmail({
+          to,
+          cc,
+          subject,
+          html,
+          from: "IvyPi Deadlines <noreply@ivypi.org>",
         });
 
         // Log
