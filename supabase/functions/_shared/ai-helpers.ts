@@ -83,6 +83,53 @@ export async function callClaude(
 }
 
 /**
+ * Call Claude API with multi-turn conversation history.
+ */
+export async function callClaudeMultiTurn(
+  system: string,
+  messages: ClaudeMessage[],
+  maxTokens = 4096,
+  model = DEFAULT_MODEL,
+): Promise<ClaudeResult> {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (!apiKey) {
+    throw new Error("ANTHROPIC_API_KEY not configured");
+  }
+
+  const response = await fetch(ANTHROPIC_API_URL, {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      system,
+      messages,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Claude API error (${response.status}): ${errorText}`);
+  }
+
+  const data: ClaudeResponse = await response.json();
+  const textBlock = data.content.find((b) => b.type === "text");
+  if (!textBlock?.text) {
+    throw new Error("No text response from Claude");
+  }
+
+  return {
+    text: textBlock.text,
+    usage: data.usage,
+    model,
+  };
+}
+
+/**
  * Parse a JSON response from Claude, handling markdown code fences.
  */
 export function parseJsonResponse<T>(text: string): T {
