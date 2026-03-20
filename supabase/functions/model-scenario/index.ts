@@ -134,6 +134,8 @@ Important:
 - Compare against the CURRENT profile insights to identify tier changes
 - Be realistic about what modifications would actually shift tiers
 - Adding one AP course alone rarely shifts Academic Rigor from Developing to Compelling
+- CRITICAL: Adding a course or activity must NEVER decrease a tier unless it actively harms coherence (e.g. an off-brand activity diluting focus). Adding AP Physics C should not lower Intellectual Curiosity — it shows STEM breadth. If the narrative for a dimension is positive, the tier must not go down.
+- Ensure the tier direction is consistent with the narrative you write. If the narrative describes improvement, the tier must stay the same or go up — never down.
 - Focus on how modifications affect the coherence of the student's story
 - Be constructive and encouraging`;
 
