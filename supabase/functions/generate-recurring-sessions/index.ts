@@ -20,6 +20,8 @@ Deno.serve(async (req: Request) => {
       first_ends_at,
       recurrence,
       total_sessions,
+      student_ids,
+      recurrence_group_id,
     } = await req.json();
 
     // Validate required fields
@@ -51,7 +53,7 @@ Deno.serve(async (req: Request) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    const recurrenceGroupId = crypto.randomUUID();
+    const groupId = recurrence_group_id || crypto.randomUUID();
     const intervalDays = recurrence === "weekly" ? 7 : 14;
 
     const firstStart = new Date(first_starts_at);
@@ -65,50 +67,61 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Calculate all candidate session dates
+    // Calculate all candidate session dates (starting from offset 1 since the first is already booked)
     const candidates: { starts_at: Date; ends_at: Date }[] = [];
-    for (let i = 0; i < total_sessions; i++) {
+    for (let i = 1; i <= total_sessions; i++) {
       const offsetMs = i * intervalDays * 24 * 60 * 60 * 1000;
       const startsAt = new Date(firstStart.getTime() + offsetMs);
       const endsAt = new Date(startsAt.getTime() + sessionDurationMs);
       candidates.push({ starts_at: startsAt, ends_at: endsAt });
     }
 
-    // Check availability for each candidate via get_available_slots RPC
+    // Check availability for each candidate by querying availability_slots directly
     const availableBookings: { starts_at: string; ends_at: string }[] = [];
     const unavailableDates: string[] = [];
 
     for (const candidate of candidates) {
       const dateStr = candidate.starts_at.toISOString().split("T")[0];
-      const timeStr = candidate.starts_at.toISOString().split("T")[1].substring(0, 5); // HH:MM
+      // Two 30-min slots that make up the 60-min session
+      const slot1Time =
+        candidate.starts_at.toISOString().split("T")[1].substring(0, 5) + ":00";
+      const slot2Dt = new Date(candidate.starts_at.getTime() + 30 * 60 * 1000);
+      const slot2Time =
+        slot2Dt.toISOString().split("T")[1].substring(0, 5) + ":00";
 
-      const { data: slots, error: slotsError } = await supabase.rpc(
-        "get_available_slots",
-        {
-          p_counselor_id: counselor_id,
-          p_date: dateStr,
-        },
-      );
+      // Check counselor has both 30-min slots
+      const { data: counselorSlots } = await supabase
+        .from("availability_slots")
+        .select("slot_start")
+        .eq("owner_type", "counselor")
+        .eq("owner_id", counselor_id)
+        .eq("slot_date", dateStr)
+        .in("slot_start", [slot1Time, slot2Time]);
 
-      if (slotsError) {
-        console.error(`Error checking slots for ${dateStr}:`, slotsError.message);
+      if (!counselorSlots || counselorSlots.length < 2) {
         unavailableDates.push(dateStr);
         continue;
       }
 
-      // Check if the desired time slot exists in the available slots
-      const slotAvailable = slots?.some(
-        (slot: { start_time: string }) => slot.start_time === timeStr,
-      );
+      // Check no conflicting confirmed booking exists for this counselor at this time
+      const { data: conflicts } = await supabase
+        .from("bookings")
+        .select("id")
+        .eq("counselor_id", counselor_id)
+        .eq("status", "confirmed")
+        .lt("starts_at", candidate.ends_at.toISOString())
+        .gt("ends_at", candidate.starts_at.toISOString())
+        .limit(1);
 
-      if (slotAvailable) {
-        availableBookings.push({
-          starts_at: candidate.starts_at.toISOString(),
-          ends_at: candidate.ends_at.toISOString(),
-        });
-      } else {
+      if (conflicts && conflicts.length > 0) {
         unavailableDates.push(dateStr);
+        continue;
       }
+
+      availableBookings.push({
+        starts_at: candidate.starts_at.toISOString(),
+        ends_at: candidate.ends_at.toISOString(),
+      });
     }
 
     if (availableBookings.length === 0) {
@@ -121,14 +134,15 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Insert all valid bookings atomically
+    // Insert all valid bookings
     const bookingRows = availableBookings.map((slot) => ({
       counselor_id,
       client_id,
       starts_at: slot.starts_at,
       ends_at: slot.ends_at,
       status: "confirmed",
-      recurrence_group_id: recurrenceGroupId,
+      recurrence,
+      recurrence_group_id: groupId,
     }));
 
     const { data: insertedBookings, error: insertError } = await supabase
@@ -140,12 +154,31 @@ Deno.serve(async (req: Request) => {
       throw new Error(`Failed to insert bookings: ${insertError.message}`);
     }
 
+    // Insert booking_students rows for each new booking
+    if (insertedBookings && student_ids && student_ids.length > 0) {
+      const bsRows = insertedBookings.flatMap(
+        (b: { id: string }) =>
+          student_ids.map((sid: string) => ({
+            booking_id: b.id,
+            student_id: sid,
+          })),
+      );
+
+      const { error: bsError } = await supabase
+        .from("booking_students")
+        .insert(bsRows);
+
+      if (bsError) {
+        console.error("Failed to insert booking_students:", bsError.message);
+      }
+    }
+
     const createdIds = insertedBookings?.map((b: { id: string }) => b.id) ?? [];
 
     return new Response(
       JSON.stringify({
         success: true,
-        recurrence_group_id: recurrenceGroupId,
+        recurrence_group_id: groupId,
         created: createdIds,
         unavailable_dates: unavailableDates,
       }),

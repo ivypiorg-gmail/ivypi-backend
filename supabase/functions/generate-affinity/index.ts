@@ -46,11 +46,18 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const { data: callerProfile } = await supabase
+    const { data: callerProfile, error: profileError } = await supabase
       .from("profiles")
       .select("id, role")
       .eq("id", caller.id)
       .single();
+
+    if (profileError) {
+      return new Response(
+        JSON.stringify({ error: "Failed to fetch profile" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     if (!callerProfile || !["counselor", "admin"].includes(callerProfile.role)) {
       return new Response(

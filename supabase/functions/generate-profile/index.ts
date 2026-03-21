@@ -126,7 +126,7 @@ Be honest but constructive. Focus on growth opportunities, not deficiencies.`;
       // Save to student record and clear staleness flag
       await ctx.supabase
         .from("students")
-        .update({ profile_insights: insights, profile_stale: false })
+        .update({ profile_insights: insights, profile_stale: false, profile_insights_generated_at: new Date().toISOString() })
         .eq("id", student_id);
 
       return { message: "Profile generated successfully" };

@@ -49,6 +49,7 @@ Deno.serve(
       const alerts: SqlAlert[] = sqlAlerts ?? [];
 
       // Clean up previous undismissed alerts not referenced by any scenario
+      // Fetch referenced IDs and delete in a tight sequence to minimize race window
       const { data: referencedAlertIds } = await ctx.supabase
         .from("scenarios")
         .select("source_alert_id")
@@ -58,17 +59,33 @@ Deno.serve(
         .map((r: { source_alert_id: string }) => r.source_alert_id)
         .filter(Boolean);
 
-      let deleteQuery = ctx.supabase
+      // Use a subquery-style approach: only delete alerts that are NOT referenced
+      // by any scenario (re-check at delete time to avoid racing with concurrent inserts)
+      const { data: alertsToDelete } = await ctx.supabase
         .from("portfolio_alerts")
-        .delete()
+        .select("id")
         .eq("counselor_id", counselorId)
         .is("dismissed_at", null);
 
-      if (referencedIds.length > 0) {
-        deleteQuery = deleteQuery.not("id", "in", `(${referencedIds.join(",")})`);
-      }
+      const { data: currentRefs } = await ctx.supabase
+        .from("scenarios")
+        .select("source_alert_id")
+        .not("source_alert_id", "is", null);
 
-      await deleteQuery;
+      const currentRefSet = new Set(
+        (currentRefs ?? []).map((r: { source_alert_id: string }) => r.source_alert_id).filter(Boolean)
+      );
+
+      const idsToDelete = (alertsToDelete ?? [])
+        .map((a: { id: string }) => a.id)
+        .filter((id: string) => !currentRefSet.has(id));
+
+      if (idsToDelete.length > 0) {
+        await ctx.supabase
+          .from("portfolio_alerts")
+          .delete()
+          .in("id", idsToDelete);
+      }
 
       // Write SQL alerts immediately
       const sqlInserts = alerts.map((a: SqlAlert) => ({

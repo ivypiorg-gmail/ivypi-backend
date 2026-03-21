@@ -14,9 +14,12 @@ Deno.serve(async (req: Request) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
+    // Extract today's date string first (UTC), then add days to avoid timezone edge cases
     const today = new Date();
-    const in7d = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-    const in2d = new Date(today.getTime() + 2 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const todayStr = today.toISOString().split("T")[0];
+    const todayDate = new Date(todayStr + "T00:00:00Z");
+    const in7d = new Date(todayDate.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const in2d = new Date(todayDate.getTime() + 2 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
     const windows = [
       { date: in7d, type: "deadline_reminder_7d" as const, template: deadlineReminder7d },
@@ -64,21 +67,29 @@ Deno.serve(async (req: Request) => {
         let counselorEmail: string | null = null;
 
         if (parentId) {
-          const { data: parentProfile } = await supabase
+          const { data: parentProfile, error: parentError } = await supabase
             .from("profiles")
             .select("email, full_name")
             .eq("id", parentId)
             .single();
+          if (parentError) {
+            console.error(`Failed to fetch parent profile ${parentId}:`, parentError.message);
+            continue;
+          }
           parentEmail = parentProfile?.email ?? null;
           parentName = parentProfile?.full_name ?? "Parent";
         }
 
         if (counselorId) {
-          const { data: counselorProfile } = await supabase
+          const { data: counselorProfile, error: counselorError } = await supabase
             .from("profiles")
             .select("email")
             .eq("id", counselorId)
             .single();
+          if (counselorError) {
+            console.error(`Failed to fetch counselor profile ${counselorId}:`, counselorError.message);
+            continue;
+          }
           counselorEmail = counselorProfile?.email ?? null;
         }
 
