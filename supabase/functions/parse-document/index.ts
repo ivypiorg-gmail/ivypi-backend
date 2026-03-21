@@ -139,8 +139,13 @@ Return ONLY valid JSON with this exact structure:
 }
 
 Guidelines:
-- detected_types: list which types of data are present (e.g. ["transcript"] if only courses/GPA found)
-- Extract ALL courses, activities, and awards visible in the document
+- detected_types: classify the document based on its PRIMARY purpose, not just what data happens to appear:
+  - "transcript" = an official or unofficial school transcript — a document whose primary purpose is listing courses, grades, GPA, and academic records. It typically comes from a school or registrar.
+  - "resume" = a student resume or CV — a document formatted as a resume whose primary purpose is summarizing activities, work experience, skills, and/or achievements. Even if it mentions GPA or coursework, classify it as "resume" if the format and purpose is a resume.
+  - "activity_list" = a standalone list of extracurricular activities (not formatted as a resume).
+  - A document should almost never be both "transcript" and "resume" — these are fundamentally different document types. Only include multiple types if the document truly contains separate sections that serve different purposes (e.g. a transcript stapled with an activity list).
+  - If the document doesn't clearly fit any category, use an empty array [].
+- Extract ALL courses, activities, and awards visible in the document regardless of detected_types
 - Infer subject_area/level from course names (e.g. "AP Calculus BC" → math, ap)
 - course_type: "college" for university/dual enrollment courses, "online" for online courses, "high_school" for everything else
 - Infer activity category from context
@@ -208,10 +213,17 @@ Guidelines:
       }>;
     }>(result.text);
 
+    // Derive document type from detected_types
+    const detectedTypes = parsed.detected_types ?? [];
+    let docType = "document";
+    if (detectedTypes.includes("transcript")) docType = "transcript";
+    else if (detectedTypes.includes("resume")) docType = "resume";
+    else if (detectedTypes.includes("activity_list")) docType = "activity_list";
+
     // Save parsed data to document — do NOT insert courses/activities/awards
     await supabase
       .from("documents")
-      .update({ parsed_data: parsed, parse_status: "complete" })
+      .update({ parsed_data: parsed, parse_status: "complete", type: docType })
       .eq("id", document_id);
 
     return new Response(
