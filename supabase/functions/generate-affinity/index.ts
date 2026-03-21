@@ -156,14 +156,34 @@ Generate affinity reports for these schools: ${schoolNames.join(", ")}`;
       }>;
     }>(result.text);
 
-    // Update each school's affinity report
+    // Update each school's affinity report, preserving history
     let updatedCount = 0;
+    const now = new Date().toISOString();
     for (const school of schools) {
       const report = parsed.reports?.[school.school_name];
       if (report) {
+        // Push the old report into history if one exists
+        const history = Array.isArray(school.affinity_report_history)
+          ? school.affinity_report_history
+          : [];
+        if (
+          school.affinity_report &&
+          typeof school.affinity_report === "object" &&
+          Object.keys(school.affinity_report).length > 0
+        ) {
+          history.push({
+            report: school.affinity_report,
+            generated_at: school.affinity_generated_at || school.updated_at,
+          });
+        }
+
         await supabase
           .from("college_lists")
-          .update({ affinity_report: report })
+          .update({
+            affinity_report: report,
+            affinity_generated_at: now,
+            affinity_report_history: history,
+          })
           .eq("id", school.id);
         updatedCount++;
       }
