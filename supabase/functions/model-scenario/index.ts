@@ -130,14 +130,24 @@ Return ONLY valid JSON with this exact structure:
   "scenario_narrative": "A 3-4 sentence paragraph summarizing the overall impact of these modifications on the student's profile, highlighting the most significant tier changes and strategic value."
 }
 
-Important:
-- Compare against the CURRENT profile insights to identify tier changes
-- Be realistic about what modifications would actually shift tiers
-- Adding one AP course alone rarely shifts Academic Rigor from Developing to Compelling
-- CRITICAL: Adding a course or activity must NEVER decrease a tier unless it actively harms coherence (e.g. an off-brand activity diluting focus). Adding AP Physics C should not lower Intellectual Curiosity — it shows STEM breadth. If the narrative for a dimension is positive, the tier must not go down.
-- Ensure the tier direction is consistent with the narrative you write. If the narrative describes improvement, the tier must stay the same or go up — never down.
-- Focus on how modifications affect the coherence of the student's story
-- Be constructive and encouraging`;
+RULES — read these carefully before generating your response:
+
+1. TIER-NARRATIVE CONSISTENCY (most important rule):
+   Before finalizing each dimension, verify: does the tier direction match the narrative?
+   - If your narrative says the modification helps, supports, strengthens, or broadens a dimension → the tier MUST stay the same or go UP. It must NEVER go down.
+   - If your narrative says the modification hurts, dilutes, or weakens a dimension → the tier may go down.
+   - A tier decrease paired with a positive narrative is a contradiction. This is the #1 mistake to avoid.
+
+2. SCENARIO-NARRATIVE CONSISTENCY:
+   The scenario_narrative summarizes the overall impact. Every claim in it must match the actual tier directions above. If you say a dimension "improved" or was "supported", the tier for that dimension must not have decreased.
+
+3. ADDITIVE MODIFICATIONS:
+   Adding a course, activity, or improving a test score should almost never decrease any tier. The only exception is if the addition actively harms narrative coherence (e.g. a random activity that dilutes an otherwise focused profile). If you are not describing such harm in the narrative, do not lower the tier.
+
+4. SELF-CHECK:
+   After generating your JSON, mentally review each dimension: "Did I lower a tier? If so, does my narrative explicitly explain WHY this modification is harmful to that dimension?" If the answer is no, keep the tier at its current level.
+
+5. Be realistic — one AP course alone rarely shifts Academic Rigor from Developing to Compelling. Focus on how modifications affect the coherence of the student's story. Be constructive and encouraging.`;
 
     const result = await callClaude(systemPrompt, studentContext, 4096);
     const parsed = parseJsonResponse<{
