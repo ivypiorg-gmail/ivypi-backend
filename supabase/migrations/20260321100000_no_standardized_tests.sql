@@ -1,0 +1,1 @@
+ALTER TABLE students ADD COLUMN IF NOT EXISTS no_standardized_tests BOOLEAN NOT NULL DEFAULT false;
