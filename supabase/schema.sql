@@ -1223,7 +1223,9 @@ CREATE TABLE IF NOT EXISTS "public"."students" (
     "narrative_arc_shared_keys" "text"[] DEFAULT '{}'::"text"[] NOT NULL,
     "application_cycle" integer,
     "profile_insights_generated_at" timestamp with time zone,
-    "no_standardized_tests" boolean DEFAULT false NOT NULL
+    "no_standardized_tests" boolean DEFAULT false NOT NULL,
+    "suggested_scenarios" "jsonb" DEFAULT '[]'::"jsonb",
+    "suggested_scenarios_generated_at" timestamp with time zone
 );
 
 

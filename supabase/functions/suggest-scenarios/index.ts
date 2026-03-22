@@ -8,7 +8,7 @@ interface SuggestedScenario {
   key: string;
   title: string;
   rationale: string;
-  source_type: "gap" | "contradiction" | "identity_frame" | "throughline";
+  source_type: "dimension";
   source_key: string;
   modifications: { type: string; description: string; details: Record<string, string> }[];
 }
@@ -88,84 +88,96 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Fetch student data
-    const [arcRes, collegeRes, studentRes] = await Promise.all([
+    // Fetch student data — profile insights are the primary input
+    const [studentRes, collegeRes, arcRes] = await Promise.all([
       supabase
-        .from("narrative_arcs")
-        .select("arc, stage")
-        .eq("student_id", student_id)
+        .from("students")
+        .select("full_name, profile_insights")
+        .eq("id", student_id)
         .single(),
       supabase
         .from("college_lists")
         .select("school_name, app_status, app_round")
         .eq("student_id", student_id),
       supabase
-        .from("students")
-        .select("full_name, profile_insights")
-        .eq("id", student_id)
+        .from("narrative_arcs")
+        .select("arc, stage")
+        .eq("student_id", student_id)
         .single(),
     ]);
 
-    if (!arcRes.data?.arc) {
-      return new Response(JSON.stringify({ error: "No narrative arc found" }), {
+    const student = studentRes.data;
+    if (!student?.profile_insights || Object.keys(student.profile_insights).length === 0) {
+      return new Response(JSON.stringify({ error: "No profile insights found" }), {
         status: 404,
         headers: { "Content-Type": "application/json" },
       });
     }
 
-    const arc = arcRes.data.arc;
     const colleges = collegeRes.data ?? [];
-    const student = studentRes.data;
+    const arc = arcRes.data?.arc ?? null;
 
-    const systemPrompt = `You are a college admissions strategist. Given this student's narrative arc, suggest 3-5 specific actions that would strengthen their application.
+    const systemPrompt = `You are a college admissions strategist. Given this student's profile insights across 6 dimensions, suggest 3-5 specific actions that would strengthen their weakest areas.
 
 Each suggestion must:
-- Reference a specific gap, contradiction, identity frame, or throughline from the arc by its "key" field
+- Reference a specific profile dimension by its key (e.g. "community_impact", "academic_rigor", "extracurricular_depth", "leadership", "intellectual_curiosity", "narrative_coherence")
 - Propose concrete modifications using ONLY these types: add_course, add_activity, drop_activity, improve_test_score
 - Each modification needs: type, description (human-readable summary), details (key-value pairs specific to the type)
 - For add_course: details must have "name" and "level" (e.g. AP, IB, Honors)
 - For add_activity: details must have "name" and "role"
 - For drop_activity: details must have "name"
 - For improve_test_score: details must have "test" and "score"
-- Explain WHY this action addresses the identified issue
+- Explain WHY this action addresses the identified weakness
 - Be actionable within the current application cycle
+- Prioritize dimensions with "Developing" or "Emerging" tiers
 
-Respond with a JSON array: [{ "key": "...", "title": "...", "rationale": "...", "source_type": "gap|contradiction|identity_frame|throughline", "source_key": "...", "modifications": [...] }]`;
+${arc ? "If narrative arc context is provided, use it to add strategic depth — consider gaps, contradictions, and throughlines when crafting suggestions." : ""}
 
-    const userContent = `Student: ${student?.full_name ?? "Unknown"}
+Respond with a JSON array: [{ "key": "<unique-id>", "title": "...", "rationale": "...", "source_type": "dimension", "source_key": "<dimension_key>", "modifications": [...] }]`;
 
-Narrative Arc (stage: ${arcRes.data.stage}):
-Throughlines: ${JSON.stringify(arc.throughlines?.map((t: { key: string; title: string; narrative: string }) => ({ key: t.key, title: t.title, narrative: t.narrative })) ?? [])}
-Gaps: ${JSON.stringify(arc.gaps ?? [])}
-Contradictions: ${JSON.stringify(arc.contradictions ?? [])}
-Identity Frames: ${JSON.stringify(arc.identity_frames?.map((f: { key: string; title: string; pitch: string; best_for: string[] }) => ({ key: f.key, title: f.title, pitch: f.pitch, best_for: f.best_for })) ?? [])}
+    const profileSection = Object.entries(student.profile_insights as Record<string, { tier: string; narrative: string; recommendation: string }>)
+      .map(([dim, data]) => `- ${dim}: ${data.tier}\n  Narrative: ${data.narrative}\n  Recommendation: ${data.recommendation}`)
+      .join("\n");
+
+    let userContent = `Student: ${student.full_name}
+
+Profile Insights:
+${profileSection}
 
 College List:
-${colleges.map((c: { school_name: string; app_status: string; app_round: string | null }) => `- ${c.school_name} (${c.app_status}${c.app_round ? `, ${c.app_round}` : ""})`).join("\n")}
+${colleges.map((c: { school_name: string; app_status: string; app_round: string | null }) => `- ${c.school_name} (${c.app_status}${c.app_round ? `, ${c.app_round}` : ""})`).join("\n")}`;
 
-Current Profile:
-${student?.profile_insights ? Object.entries(student.profile_insights).map(([dim, data]: [string, unknown]) => {
-  const d = data as { tier: string };
-  return `- ${dim}: ${d.tier}`;
-}).join("\n") : "No profile insights available"}`;
+    // Add narrative arc as optional enrichment context
+    if (arc) {
+      userContent += `
+
+Narrative Arc Context (for strategic depth):
+Throughlines: ${JSON.stringify(arc.throughlines?.map((t: { key: string; title: string; narrative: string }) => ({ key: t.key, title: t.title, narrative: t.narrative })) ?? [])}
+Gaps: ${JSON.stringify(arc.gaps ?? [])}
+Contradictions: ${JSON.stringify(arc.contradictions ?? [])}`;
+    }
 
     const result = await callClaude(systemPrompt, userContent, 2048);
     const suggestions = parseJsonResponse<SuggestedScenario[]>(result.text);
 
-    // Validate: filter out any with invalid source_type
-    const validSourceTypes = ["gap", "contradiction", "identity_frame", "throughline"];
+    // Validate: ensure all have source_type "dimension" and valid dimension keys
+    const validDimensions = ["academic_rigor", "extracurricular_depth", "leadership", "community_impact", "intellectual_curiosity", "narrative_coherence"];
     const validated = suggestions.filter(
       (s: SuggestedScenario) =>
         s.key && s.title && s.rationale && s.source_key &&
-        validSourceTypes.includes(s.source_type) &&
+        s.source_type === "dimension" &&
+        validDimensions.includes(s.source_key) &&
         Array.isArray(s.modifications) && s.modifications.length > 0
     );
 
-    // Save to narrative_arcs
+    // Save to students table
     const { error: updateError } = await supabase
-      .from("narrative_arcs")
-      .update({ suggested_scenarios: validated })
-      .eq("student_id", student_id);
+      .from("students")
+      .update({
+        suggested_scenarios: validated,
+        suggested_scenarios_generated_at: new Date().toISOString(),
+      })
+      .eq("id", student_id);
 
     if (updateError) {
       return new Response(JSON.stringify({ error: updateError.message }), {

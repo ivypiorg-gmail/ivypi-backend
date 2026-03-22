@@ -129,6 +129,17 @@ Be honest but constructive. Focus on growth opportunities, not deficiencies.`;
         .update({ profile_insights: insights, profile_stale: false, profile_insights_generated_at: new Date().toISOString() })
         .eq("id", student_id);
 
+      // Fire-and-forget: generate scenario suggestions from new insights
+      const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+      fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/suggest-scenarios`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${serviceKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ student_id }),
+      }).catch(() => {}); // Silent failure — suggestions are non-critical
+
       return { message: "Profile generated successfully" };
     },
   }),
