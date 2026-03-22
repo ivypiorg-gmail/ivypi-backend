@@ -117,12 +117,15 @@ Return ONLY valid JSON with this exact structure:
   ],
   "activities": [
     {
-      "name": "string",
+      "name": "string (the activity/position name, e.g. 'Debate Team', 'Software Engineering Intern')",
       "category": "academic|arts|athletics|community_service|leadership|work|research|other",
-      "role": "string or null (e.g. President, Captain, Volunteer)",
+      "activity_type": "string or null (specific sub-type, e.g. 'Varsity Sport', 'Paid Employment', 'Internship', 'Science Olympiad', 'Volunteering', 'Club Officer', 'University Research')",
+      "role": "string or null (e.g. President, Captain, Volunteer, Intern, Employee)",
+      "organization": "string or null (the organization, company, school, or team name — e.g. 'Google', 'National Honor Society', 'City Food Bank')",
       "years_active": [9, 10, 11] or null,
       "hours_per_week": number or null,
-      "impact_description": "string or null",
+      "weeks_per_year": number or null (e.g. 52 for year-round, 36 for school year, 10 for summer),
+      "impact_description": "string or null (a concise 1-2 sentence summary of the activity's impact and the student's contributions)",
       "resume_bullets": "string or null (preserve the EXACT bullet point text from the document, one bullet per line)",
       "depth_tier": "exceptional|strong|moderate|introductory"
     }
@@ -135,6 +138,14 @@ Return ONLY valid JSON with this exact structure:
       "grade_year": number or null,
       "description": "string or null"
     }
+  ],
+  "colleges": [
+    {
+      "school_name": "string (the college/university name)",
+      "app_round": "ed|ed2|ea|rea|rd" or null,
+      "deadline_date": "YYYY-MM-DD" or null,
+      "deadline_type": "string (e.g. Application, Financial Aid, Housing) or null"
+    }
   ]
 }
 
@@ -143,15 +154,28 @@ Guidelines:
   - "transcript" = an official or unofficial school transcript — a document whose primary purpose is listing courses, grades, GPA, and academic records. It typically comes from a school or registrar.
   - "resume" = a student resume or CV — a document formatted as a resume whose primary purpose is summarizing activities, work experience, skills, and/or achievements. Even if it mentions GPA or coursework, classify it as "resume" if the format and purpose is a resume.
   - "activity_list" = a standalone list of extracurricular activities (not formatted as a resume).
+  - "college_list" = a list of colleges the student is applying to, often with decision types (ED/EA/REA/RD) and deadlines.
   - A document should almost never be both "transcript" and "resume" — these are fundamentally different document types. Only include multiple types if the document truly contains separate sections that serve different purposes (e.g. a transcript stapled with an activity list).
   - If the document doesn't clearly fit any category, use an empty array [].
 - Extract ALL courses, activities, and awards visible in the document regardless of detected_types
 - Infer subject_area/level from course names (e.g. "AP Calculus BC" → math, ap)
 - course_type: "college" for university/dual enrollment courses, "online" for online courses, "high_school" for everything else
-- Infer activity category from context
+- Infer activity category from context:
+  - Jobs, internships, and paid positions → "work"
+  - Club leadership, student government → "leadership"
+  - Sports teams → "athletics"
+  - Volunteering, community organizations → "community_service"
+  - Lab work, independent projects, science fairs → "research"
+  - Music, theater, visual art, dance, film → "arts"
+  - Academic competitions, tutoring, academic clubs → "academic"
+- For activity_type: match to these common sub-types when applicable: "Varsity Sport", "JV Sport", "Club Sport", "Paid Employment", "Internship", "Family Business", "Volunteering", "Fundraising", "Mentoring", "Student Government", "Club Officer", "University Research", "Independent Research", "Science Fair", "Math Club", "Science Olympiad", "Model UN", "Music (Instrumental)", "Music (Vocal)", "Theater/Drama", "Visual Art", "Dance", "Creative Writing"
+- For organization: extract the company, school, club, team, or org name. This is distinct from the activity name — e.g. activity "Software Intern" at organization "Google", or activity "Varsity Soccer" at organization "Lincoln High School"
 - Use standard letter grades for course grades when possible
-- For resume_bullets: copy the EXACT bullet point text from the document verbatim, one bullet per line (no leading dashes/dots). If the document has no bullet points for an activity, use null
+- For resume_bullets: copy the EXACT bullet point text from the document verbatim, one bullet per line (no leading dashes/dots). Include ALL bullets for each activity — these are critical for building the student's resume. If the document has no bullet points for an activity, use null
+- For impact_description: synthesize a brief summary of the student's contributions and achievements in this activity. If the resume has bullet points, distill them into a concise impact statement. Do not leave this null if there is any descriptive text about the activity
+- For weeks_per_year: infer from context — summer programs are typically 6-10 weeks, school-year activities 36 weeks, year-round commitments 52 weeks
 - For depth_tier: exceptional = multi-year with state/national recognition, strong = sustained with leadership, moderate = regular participation, introductory = casual/short-term
+- For colleges: extract the school name, application round (ED/ED2/EA/REA/RD mapped to ed/ed2/ea/rea/rd), deadline dates (in YYYY-MM-DD format), and deadline type. If the document is a college list, populate the colleges array. Return an empty array if no college list data is found
 - Return empty arrays for data types not present in the document
 - Use null when uncertain rather than guessing`;
 
@@ -166,7 +190,7 @@ Guidelines:
       },
       {
         type: "text" as const,
-        text: "Parse this student document. Extract all available data: profile info, courses, activities, and awards. Return JSON only.",
+        text: "Parse this student document. Extract all available data: profile info, courses, activities, awards, and college list entries. Return JSON only.",
       },
     ];
 
@@ -197,9 +221,12 @@ Guidelines:
       activities: Array<{
         name: string;
         category: string;
+        activity_type: string | null;
         role: string | null;
+        organization: string | null;
         years_active: number[] | null;
         hours_per_week: number | null;
+        weeks_per_year: number | null;
         impact_description: string | null;
         resume_bullets: string | null;
         depth_tier: string;
@@ -211,7 +238,16 @@ Guidelines:
         grade_year: number | null;
         description: string | null;
       }>;
+      colleges?: Array<{
+        school_name: string;
+        app_round: string | null;
+        deadline_date: string | null;
+        deadline_type: string | null;
+      }>;
     }>(result.text);
+
+    // Ensure colleges array exists (backwards compat with older model responses)
+    if (!parsed.colleges) parsed.colleges = [];
 
     // Derive document type from detected_types
     const detectedTypes = parsed.detected_types ?? [];
@@ -219,6 +255,7 @@ Guidelines:
     if (detectedTypes.includes("transcript")) docType = "transcript";
     else if (detectedTypes.includes("resume")) docType = "resume";
     else if (detectedTypes.includes("activity_list")) docType = "activity_list";
+    else if (detectedTypes.includes("college_list")) docType = "document";
 
     // Save parsed data to document — do NOT insert courses/activities/awards
     await supabase
