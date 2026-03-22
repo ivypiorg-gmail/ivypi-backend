@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { callClaude, parseJsonResponse } from "../_shared/ai-helpers.ts";
+import { corsHeaders } from "../_shared/edge-middleware.ts";
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -37,14 +38,11 @@ interface StrategyPlaybook {
   packages: StrategyPackage[];
 }
 
+const jsonHeaders = { ...corsHeaders, "Content-Type": "application/json" };
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-      },
-    });
+    return new Response("ok", { headers: corsHeaders });
   }
 
   try {
@@ -60,7 +58,7 @@ Deno.serve(async (req) => {
       if (authError || !user) {
         return new Response(JSON.stringify({ error: "Unauthorized" }), {
           status: 401,
-          headers: { "Content-Type": "application/json" },
+          headers: jsonHeaders,
         });
       }
       callerId = user.id;
@@ -75,7 +73,7 @@ Deno.serve(async (req) => {
       if (!profile || !["counselor", "admin"].includes(profile.role)) {
         return new Response(JSON.stringify({ error: "Forbidden" }), {
           status: 403,
-          headers: { "Content-Type": "application/json" },
+          headers: jsonHeaders,
         });
       }
     }
@@ -84,7 +82,7 @@ Deno.serve(async (req) => {
     if (!student_id) {
       return new Response(JSON.stringify({ error: "student_id required" }), {
         status: 400,
-        headers: { "Content-Type": "application/json" },
+        headers: jsonHeaders,
       });
     }
 
@@ -106,7 +104,7 @@ Deno.serve(async (req) => {
         if (callerProfile?.role !== "admin") {
           return new Response(JSON.stringify({ error: "Forbidden" }), {
             status: 403,
-            headers: { "Content-Type": "application/json" },
+            headers: jsonHeaders,
           });
         }
       }
@@ -142,7 +140,7 @@ Deno.serve(async (req) => {
     if (!briefing?.gaps || briefing.gaps.length === 0) {
       return new Response(
         JSON.stringify({ success: true, count: 0 }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: jsonHeaders }
       );
     }
 
@@ -212,7 +210,7 @@ ${counselor_guidance}`;
       if (!currentPlaybook || !Array.isArray(currentPlaybook.packages)) {
         return new Response(
           JSON.stringify({ error: "No existing playbook to regenerate from" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
+          { status: 400, headers: jsonHeaders }
         );
       }
 
@@ -220,7 +218,7 @@ ${counselor_guidance}`;
       if (targetIndex === -1) {
         return new Response(
           JSON.stringify({ error: `Package with key "${regenerate_key}" not found` }),
-          { status: 404, headers: { "Content-Type": "application/json" } }
+          { status: 404, headers: jsonHeaders }
         );
       }
 
@@ -304,7 +302,7 @@ Respond with a JSON object matching this exact schema:
       if (updateError) {
         return new Response(JSON.stringify({ error: updateError.message }), {
           status: 500,
-          headers: { "Content-Type": "application/json" },
+          headers: jsonHeaders,
         });
       }
 
@@ -315,7 +313,7 @@ Respond with a JSON object matching this exact schema:
           count: updatedPackages.length,
           usage: regenResult.usage,
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: jsonHeaders }
       );
     }
 
@@ -405,7 +403,7 @@ Respond with a JSON object matching this exact schema:
     if (updateError) {
       return new Response(JSON.stringify({ error: updateError.message }), {
         status: 500,
-        headers: { "Content-Type": "application/json" },
+        headers: jsonHeaders,
       });
     }
 
@@ -415,12 +413,12 @@ Respond with a JSON object matching this exact schema:
         count: validatedPackages.length,
         usage: result.usage,
       }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
+      { status: 200, headers: jsonHeaders }
     );
   } catch (err) {
     return new Response(
       JSON.stringify({ error: err instanceof Error ? err.message : "Unknown error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+      { status: 500, headers: jsonHeaders }
     );
   }
 });
