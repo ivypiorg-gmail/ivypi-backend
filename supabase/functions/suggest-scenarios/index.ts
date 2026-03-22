@@ -8,7 +8,7 @@ interface SuggestedScenario {
   key: string;
   title: string;
   rationale: string;
-  source_type: "dimension";
+  source_type: "gap";
   source_key: string;
   modifications: { type: string; description: string; details: Record<string, string> }[];
 }
@@ -107,42 +107,70 @@ Deno.serve(async (req) => {
     ]);
 
     const student = studentRes.data;
-    if (!student?.profile_insights || Object.keys(student.profile_insights).length === 0) {
-      return new Response(JSON.stringify({ error: "No profile insights found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
+    const briefing = student?.profile_insights as {
+      strategic_overview?: string;
+      grade_context?: { urgency?: string };
+      strengths?: { title: string; narrative: string; tier: string; evidence?: string[] }[];
+      gaps?: { title: string; narrative: string; suggestion: string; tier: string }[];
+      next_steps?: { action: string; rationale: string; priority: number }[];
+    } | null;
+
+    if (!briefing?.gaps || briefing.gaps.length === 0) {
+      return new Response(
+        JSON.stringify({ success: true, count: 0 }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     const colleges = collegeRes.data ?? [];
     const arc = arcRes.data?.arc ?? null;
 
-    const systemPrompt = `You are a college admissions strategist. Given this student's profile insights across 6 dimensions, suggest 3-5 specific actions that would strengthen their weakest areas.
+    const urgency = briefing.grade_context?.urgency ?? "building";
+
+    const systemPrompt = `You are a college admissions strategist. Given this student's strategic briefing, suggest 3-5 specific actions that would address their identified gaps.
 
 Each suggestion must:
-- Reference a specific profile dimension by its key (e.g. "community_impact", "academic_rigor", "extracurricular_depth", "leadership", "intellectual_curiosity", "narrative_coherence")
+- Reference a specific gap from the briefing by its exact title as source_key
+- source_type must always be "gap"
 - Propose concrete modifications using ONLY these types: add_course, add_activity, drop_activity, improve_test_score
 - Each modification needs: type, description (human-readable summary), details (key-value pairs specific to the type)
 - For add_course: details must have "name" and "level" (e.g. AP, IB, Honors)
 - For add_activity: details must have "name" and "role"
 - For drop_activity: details must have "name"
 - For improve_test_score: details must have "test" and "score"
-- Explain WHY this action addresses the identified weakness
-- Be actionable within the current application cycle
-- Prioritize dimensions with "Developing" or "Emerging" tiers
+- Explain WHY this action addresses the identified gap
+- Prioritize gaps with "Developing" or "Emerging" tiers
+- Urgency level is "${urgency}" — ${urgency === "exploratory" ? "suggestions should be exploratory and identity-forming" : urgency === "building" ? "suggestions should consolidate interests into clear threads" : urgency === "positioning" ? "suggestions should be urgent and positioning-focused" : "suggestions should maximize what already exists"}
 
 ${arc ? "If narrative arc context is provided, use it to add strategic depth — consider gaps, contradictions, and throughlines when crafting suggestions." : ""}
 
-Respond with a JSON array: [{ "key": "<unique-id>", "title": "...", "rationale": "...", "source_type": "dimension", "source_key": "<dimension_key>", "modifications": [...] }]`;
+Respond with a JSON array: [{ "key": "<unique-id>", "title": "...", "rationale": "...", "source_type": "gap", "source_key": "<exact_gap_title>", "modifications": [...] }]`;
 
-    const profileSection = Object.entries(student.profile_insights as Record<string, { tier: string; narrative: string; recommendation: string }>)
-      .map(([dim, data]) => `- ${dim}: ${data.tier}\n  Narrative: ${data.narrative}\n  Recommendation: ${data.recommendation}`)
+    const gapsSection = briefing.gaps
+      .map((g) => `- ${g.title} (${g.tier})\n  ${g.narrative}\n  Suggestion: ${g.suggestion}`)
+      .join("\n");
+
+    const strengthsSection = (briefing.strengths ?? [])
+      .map((s) => `- ${s.title} (${s.tier}): ${s.narrative}`)
+      .join("\n");
+
+    const nextStepsSection = (briefing.next_steps ?? [])
+      .map((ns) => `${ns.priority}. ${ns.action} — ${ns.rationale}`)
       .join("\n");
 
     let userContent = `Student: ${student.full_name}
 
-Profile Insights:
-${profileSection}
+Strategic Overview:
+${briefing.strategic_overview ?? "N/A"}
+
+Gaps (primary input for suggestions):
+${gapsSection}
+
+Strengths (context):
+${strengthsSection}
+
+Next Steps (context):
+${nextStepsSection}
 
 College List:
 ${colleges.map((c: { school_name: string; app_status: string; app_round: string | null }) => `- ${c.school_name} (${c.app_status}${c.app_round ? `, ${c.app_round}` : ""})`).join("\n")}`;
@@ -160,13 +188,12 @@ Contradictions: ${JSON.stringify(arc.contradictions ?? [])}`;
     const result = await callClaude(systemPrompt, userContent, 2048);
     const suggestions = parseJsonResponse<SuggestedScenario[]>(result.text);
 
-    // Validate: ensure all have source_type "dimension" and valid dimension keys
-    const validDimensions = ["academic_rigor", "extracurricular_depth", "leadership", "community_impact", "intellectual_curiosity", "narrative_coherence"];
+    // Validate: ensure all have source_type "gap" and non-empty source_key
     const validated = suggestions.filter(
       (s: SuggestedScenario) =>
-        s.key && s.title && s.rationale && s.source_key &&
-        s.source_type === "dimension" &&
-        validDimensions.includes(s.source_key) &&
+        s.key && s.title && s.rationale &&
+        s.source_type === "gap" &&
+        typeof s.source_key === "string" && s.source_key.length > 0 &&
         Array.isArray(s.modifications) && s.modifications.length > 0
     );
 

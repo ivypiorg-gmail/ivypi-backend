@@ -358,8 +358,6 @@ REQUIREMENTS:
         .eq("id", student_id);
 
       // Fire-and-forget: generate scenario suggestions from new insights
-      // NOTE: suggest-scenarios expects old 6-dimension format and will fail with new briefing format.
-      // This is acceptable — scenarios feature deferred to follow-up redesign.
       const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
       fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/suggest-scenarios`, {
         method: "POST",
